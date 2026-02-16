@@ -25,38 +25,24 @@ from music21 import converter, note, chord as m21chord, meter, stream
 
 # Import MIDI library at top level for PyInstaller compatibility
 try:
-    print("Attempting to import mido...")
     import mido
-    print("mido imported successfully")
-    
-    print("Attempting to import rtmidi...")
     import rtmidi  # Explicitly import the backend for PyInstaller
-    print("rtmidi imported successfully")
     
     # Import all mido backends explicitly for PyInstaller
     try:
-        print("Attempting to import mido.backends.rtmidi...")
         import mido.backends.rtmidi
-        print("mido.backends.rtmidi imported successfully")
-        
-        print("Attempting to import mido.backends._rtmidi...")
         import mido.backends._rtmidi
-        print("mido.backends._rtmidi imported successfully")
-    except ImportError as e:
-        print(f"Backend import failed: {e}")
+    except ImportError:
         pass  # Some backends may not be available
     
     MIDO_AVAILABLE = True
-    print("MIDO_AVAILABLE set to True")
-except ImportError as e:
-    print(f"MIDO import failed: {e}")
-    import traceback
-    print(f"Full traceback: {traceback.format_exc()}")
+except ImportError:
     mido = None
     MIDO_AVAILABLE = False
 
 # Import pygame for MIDI output at top level for PyInstaller compatibility
 try:
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
     import pygame
     import pygame.midi
     PYGAME_AVAILABLE = True
@@ -69,19 +55,6 @@ def resource_path(relative_path: str) -> str:
     """Return absolute path to resource for both development and PyInstaller builds."""
     base_path = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
     return os.path.join(base_path, relative_path)
-
-def debug_log(message: str) -> None:
-    """Write debug messages to both console and log file for packaged executable debugging."""
-    print(message)  # Console output
-    try:
-        # Also write to a log file in the same directory as the executable
-        log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "midi_debug.log")
-        with open(log_file, "a", encoding="utf-8") as f:
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{timestamp}] {message}\n")
-    except Exception as e:
-        print(f"Failed to write to log file: {e}")
 
 # Display symbols for chord analysis visualization
 CLEAN_STACK_SYMBOL = "✅"  # Indicates clean stacked chord voicing
@@ -130,10 +103,10 @@ ENHARMONIC_EQUIVALENTS = {
 }
 
 # Event merging algorithm parameters (default values for position 3 of 7-position slider)
-MERGE_JACCARD_THRESHOLD = 0.60  # Chord similarity threshold (0.0-1.0, higher = stricter)
-MERGE_BASS_OVERLAP = 0.50       # Required bass note overlap for merging (0.0-1.0)
-MERGE_BAR_DISTANCE = 1          # Maximum bars apart for events to merge (0 = same bar only)
-MERGE_DIFF_MAX = 1              # Maximum root differences allowed for simple merge path
+MERGE_JACCARD_THRESHOLD = 0.85  # Chord similarity threshold (0.0-1.0, higher = stricter) - matches preset 3
+MERGE_BASS_OVERLAP = 0.70       # Required bass note overlap for merging (0.0-1.0) - matches preset 3
+MERGE_BAR_DISTANCE = 0          # Maximum bars apart for events to merge (0 = same bar only) - matches preset 3
+MERGE_DIFF_MAX = 0              # Maximum root differences allowed for simple merge path - matches preset 3
 
 class LoadOptionsDialog(tk.Toplevel):
     """Dialog for selecting MusicXML files and analysis options."""
@@ -191,58 +164,13 @@ class MidiChordAnalyzer(tk.Tk):
     - Anacrusis handling for melodic resolution notes
     - Advanced event merging with configurable sensitivity
     """
-    
-    def debug_print_notes(self):
-        """Print all notes and chords with bar, beat, and duration for debugging."""
-        if not self.score:
-            print("No score loaded.")
-            return
-        flat_notes = list(self.score.flatten().getElementsByClass([note.Note, m21chord.Chord]))
-        # Use local offset_to_bar_beat from analyze_musicxml
-        def offset_to_bar_beat(offset):
-            # Find the last time signature whose offset is <= given offset
-            time_signatures = []
-            for ts in self.score.flatten().getElementsByClass(meter.TimeSignature):
-                offset_ts = float(ts.offset)
-                time_signatures.append((offset_ts, int(ts.numerator), int(ts.denominator)))
-            time_signatures.sort(key=lambda x: x[0])
-            if not time_signatures:
-                num, denom = 4, 4
-                return 1, int(offset) + 1, f"{num}/{denom}"
-            elif time_signatures[0][0] > 0.0:
-                first_num, first_den = time_signatures[0][1], time_signatures[0][2]
-                time_signatures.insert(0, (0.0, first_num, first_den))
-            bars_before = 0
-            for i, (t_off, num, denom) in enumerate(time_signatures):
-                next_off = time_signatures[i + 1][0] if i + 1 < len(time_signatures) else None
-                beat_len = 4.0 / denom
-                if next_off is None or offset < next_off:
-                    beats_since_t = (offset - t_off) / beat_len
-                    if beats_since_t < 0:
-                        beats_since_t = (offset) / beat_len
-                        bars = int(beats_since_t // num)
-                        beat = int(beats_since_t % num) + 1
-                        return bars + 1, beat, f"{num}/{denom}"
-                    bar_in_segment = int(beats_since_t // num)
-                    beat = int(beats_since_t % num) + 1
-                    return bars_before + bar_in_segment + 1, beat, f"{num}/{denom}"
-                else:
-                    segment_beats = (next_off - t_off) / beat_len
-                    bars_in_segment = int(segment_beats // num)
-                    bars_before += bars_in_segment
-            num, denom = time_signatures[-1][1], time_signatures[-1][2]
-            beat_len = 4.0 / denom
-            beats = offset / beat_len
-            return int(beats // num) + 1, int(beats % num) + 1, f"{num}/{denom}"
-
-
     def __init__(self):
         super().__init__()
         self.title("🎵 MIDI Drive Analyzer")
         
         # Set window size and position intelligently
         window_width = 650
-        window_height = 850
+        window_height = 930
         settings_width = 350  # Anticipated settings dialog width
         
         # Get screen dimensions
@@ -284,6 +212,7 @@ class MidiChordAnalyzer(tk.Tk):
         self.include_non_drive_events = True
         self.arpeggio_searching = True
         self.neighbour_notes_searching = True
+        self.neighbour_notes_mode = "relaxed"  # "off", "relaxed", or "tight"
         self.arpeggio_block_similarity_threshold = 0.5
         self.pedal_mode = "Off"  # "Off", "Every Beat", "Strong Beats", "Every Bar", "Half Bar"
         
@@ -306,6 +235,7 @@ class MidiChordAnalyzer(tk.Tk):
         self.score = None
         self.analyzed_events = None
         self.processed_events = None
+        self._settings_window = None  # Track settings window to prevent multiple instances
         
         # Drive strength parameters (configurable via dialog)
         self.custom_strength_map = None
@@ -407,7 +337,7 @@ class MidiChordAnalyzer(tk.Tk):
 
         # Main analysis results display with dark theme and proper text selection
         self.result_text = Text(
-            self, bg="black", fg="white", font=("Segoe UI", 11),
+            self, bg="black", fg="white", font=("Segoe UI", 14),
             wrap="word", borderwidth=0, highlightthickness=0,
             selectbackground="magenta", selectforeground="white",  # Visible selection colors
             insertbackground="white", relief="flat", padx=0, pady=0,
@@ -450,7 +380,7 @@ class MidiChordAnalyzer(tk.Tk):
         self.result_text.configure(spacing1=0, spacing2=0, spacing3=0)
         
         # Configure Segoe UI font tag for splash text
-        self.result_text.tag_configure("splash_font", font=("Segoe UI", 11), foreground="white")
+        self.result_text.tag_configure("splash_font", font=("Segoe UI", 14), foreground="white")
         # Insert the title.png image centered
         try:
             from PIL import Image, ImageTk
@@ -521,14 +451,49 @@ class MidiChordAnalyzer(tk.Tk):
         else:
             self.loaded_file_path = path
             self.score = converter.parse(path)
-            self.debug_print_notes()
+            
             self.run_analysis()
 
     def run_analysis(self):
         """Execute full chord analysis pipeline and update UI."""
+        # COMPREHENSIVE RESET to eliminate ALL possible state contamination
         min_duration = getattr(self, 'min_duration', 0.0)
         self.analyzed_events = None
         self.processed_events = None
+        
+        # Reset any persistent class-level analysis state that might contaminate results
+        if hasattr(self, 'beat_subdivisions'):
+            self.beat_subdivisions.clear()
+        if hasattr(self, 'beat_analysis_history'):
+            self.beat_analysis_history.clear()
+            
+        # Reset any other potential analysis state containers
+        
+        for attr_name in dir(self):
+            if not attr_name.startswith('_') and hasattr(self, attr_name):
+                attr_value = getattr(self, attr_name)
+                # Clear any sets, dicts, or lists that might contain analysis state
+                if isinstance(attr_value, (set, dict)) and attr_name not in ['chord_patterns', 'strength_vars', 'rule_vars']:
+                    try:
+                        attr_value.clear()
+                    except:
+                        pass
+                elif isinstance(attr_value, list) and attr_name not in ['chord_positions', 'entropy_points', '_label_images']:
+                    try:
+                        attr_value.clear()
+                    except:
+                        pass
+            
+        # CRITICAL: Reload score to prevent music21 object contamination between runs
+        if hasattr(self, 'loaded_file_path') and self.loaded_file_path:
+            from music21 import converter
+            # Clear music21 internal caches to ensure fresh parsing
+            try:
+                converter.clearCache()  # Clear music21's internal cache
+            except:
+                pass
+            # Force complete reload
+            self.score = converter.parse(self.loaded_file_path)
         try:
             if self.analysis_mode == "time_segment":
                 lines, events = self.analyze_musicxml_time_segments(self.score)
@@ -571,7 +536,14 @@ class MidiChordAnalyzer(tk.Tk):
 
     def open_settings(self):
         """Open analysis settings dialog with algorithm options and sensitivity controls."""
+        # Prevent multiple settings windows - bring existing one to front if it exists
+        if self._settings_window and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            self._settings_window.focus()
+            return
+            
         dialog = tk.Toplevel(self)
+        self._settings_window = dialog  # Store reference
         dialog.title("Analysis Settings")
         dialog.configure(bg="#f5f5f5")  # Set light grey background
         
@@ -593,6 +565,12 @@ class MidiChordAnalyzer(tk.Tk):
         settings_y = main_y
         
         dialog.geometry(f"{settings_width}x{settings_height}+{settings_x}+{settings_y}")
+        
+        # Clear reference when window is closed
+        def on_close():
+            self._settings_window = None
+            dialog.destroy()
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
 
         # Load and display settings title image at top center
         try:
@@ -634,7 +612,11 @@ class MidiChordAnalyzer(tk.Tk):
         
         # Mouse wheel scrolling
         def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            try:
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except tk.TclError:
+                # Canvas has been destroyed, ignore the event
+                pass
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
         # Load info button image
@@ -684,6 +666,10 @@ class MidiChordAnalyzer(tk.Tk):
             tooltip_window_ref = [None]  # Use list to allow modification in nested functions
             
             def show_tooltip(event):
+                # Check if event.widget is valid
+                if not hasattr(event, 'widget') or not hasattr(event.widget, 'winfo_rootx'):
+                    return
+                    
                 # Hide any existing tooltip first
                 if tooltip_window_ref[0]:
                     try:
@@ -732,7 +718,17 @@ class MidiChordAnalyzer(tk.Tk):
         remove_repeats_var = tk.BooleanVar(value=self.remove_repeats)
         include_anacrusis_var = tk.BooleanVar(value=self.include_anacrusis)
         arpeggio_searching_var = tk.BooleanVar(value=self.arpeggio_searching)
-        neighbour_notes_var = tk.BooleanVar(value=getattr(self, 'neighbour_notes_searching', True))
+        
+        # Combine neighbor note enabled/mode into single dropdown
+        current_neighbor_mode = getattr(self, 'neighbour_notes_mode', 'relaxed')
+        if not getattr(self, 'neighbour_notes_searching', True):
+            current_neighbor_mode = 'Off'
+        elif current_neighbor_mode == 'relaxed':
+            current_neighbor_mode = 'Relaxed (default)'
+        elif current_neighbor_mode == 'tight':
+            current_neighbor_mode = 'Tight'
+        neighbour_mode_var = tk.StringVar(value=current_neighbor_mode)
+        
         include_non_drive_var = tk.BooleanVar(value=self.include_non_drive_events)
 
         # Function to update checkbox states based on analysis mode - define early so radio buttons can reference it
@@ -742,15 +738,15 @@ class MidiChordAnalyzer(tk.Tk):
                 # Disable incompatible options for time-segment mode
                 anacrusis_cb.config(state="disabled")
                 arpeggio_cb.config(state="disabled")
-                neighbour_cb.config(state="disabled")
+                neighbour_dropdown.config(state="disabled")
                 include_anacrusis_var.set(False)
                 arpeggio_searching_var.set(False)
-                neighbour_notes_var.set(False)
+                neighbour_mode_var.set('Off')
             else:
                 # Re-enable all options for event-based mode
                 anacrusis_cb.config(state="normal")
                 arpeggio_cb.config(state="normal")
-                neighbour_cb.config(state="normal")
+                neighbour_dropdown.config(state="normal")
         
         analysis_mode_frame = create_setting_section(scrollable_frame, "Analysis Mode", 
             "Choose between event-based analysis (recommended, detects actual musical events) or time-segment analysis (divides music into regular time intervals)", None)
@@ -794,9 +790,13 @@ class MidiChordAnalyzer(tk.Tk):
         
         # Neighbour Notes
         neighbour_frame = create_setting_section(scrollable_frame, "Neighbour Notes", 
-            "Include neighbour note analysis (non-chord tones that move by step and return)", None)
-        neighbour_cb = ttk.Checkbutton(neighbour_frame, text="Enabled", variable=neighbour_notes_var, style="Settings.TCheckbutton")
-        neighbour_cb.pack(anchor="w")
+            "Include neighbour note analysis (non-chord tones that move by step and return). Relaxed mode: binds any single note change with 2+ retained notes. Tight mode: only binds adjacent (semitone) note exchanges.", None)
+        
+        from tkinter import ttk
+        neighbour_dropdown = ttk.Combobox(neighbour_frame, textvariable=neighbour_mode_var, 
+                                         values=["Off", "Relaxed (default)", "Tight"], 
+                                         state="readonly", width=20, style="Settings.TCombobox")
+        neighbour_dropdown.pack(anchor="w")
         
         # Remove Repeated Patterns
         repeats_frame = create_setting_section(scrollable_frame, "Remove Repeated Patterns", 
@@ -812,29 +812,13 @@ class MidiChordAnalyzer(tk.Tk):
         pedal_frame = create_setting_section(scrollable_frame, "Sustain Pedal", 
             "Simulate sustain pedal to hold notes across time boundaries, creating richer harmonic analysis", None)
         
-        pedal_enabled_var = tk.BooleanVar(value=getattr(self, 'pedal_mode', 'Off') != 'Off')
-        
-        # Put checkbox and mode dropdown on the same line
-        pedal_combo_frame = ttk.Frame(pedal_frame, style="Settings.TFrame")
-        pedal_combo_frame.pack(fill="x")
-        
-        pedal_cb = ttk.Checkbutton(pedal_combo_frame, text="Enabled", variable=pedal_enabled_var, style="Settings.TCheckbutton")
-        pedal_cb.pack(side="left")
-        
-        pedal_mode_var = tk.StringVar(value=getattr(self, 'pedal_mode', 'Auto') if getattr(self, 'pedal_mode', 'Off') != 'Off' else 'Auto')
-        pedal_options = ["Every Beat", "Strong Beats", "Half Bar", "Every Bar", "Auto"]
-        ttk.Label(pedal_combo_frame, text="Mode:", style="Settings.TLabel").pack(side="left", padx=(20, 5))
-        pedal_combo = ttk.Combobox(pedal_combo_frame, textvariable=pedal_mode_var, values=pedal_options, state="readonly", width=12)
+        # Simple dropdown with Off as the default/first option
+        current_pedal_mode = getattr(self, 'pedal_mode', 'Off')
+        pedal_mode_var = tk.StringVar(value=current_pedal_mode)
+        pedal_options = ["Off", "Every Beat", "Strong Beats", "Half Bar", "Every Bar", "Auto"]
+        ttk.Label(pedal_frame, text="Mode:", style="Settings.TLabel").pack(side="left", padx=(0, 5))
+        pedal_combo = ttk.Combobox(pedal_frame, textvariable=pedal_mode_var, values=pedal_options, state="readonly", width=15)
         pedal_combo.pack(side="left")
-        
-        def update_pedal_combo_state():
-            if pedal_enabled_var.get():
-                pedal_combo.config(state="readonly")
-            else:
-                pedal_combo.config(state="disabled")
-        
-        pedal_cb.config(command=update_pedal_combo_state)
-        update_pedal_combo_state()  # Set initial state
         
         # Filter Short Durations
         duration_frame = create_setting_section(scrollable_frame, "Duration Filter", 
@@ -936,10 +920,24 @@ class MidiChordAnalyzer(tk.Tk):
                 self.include_anacrusis = False
                 self.arpeggio_searching = False
                 self.neighbour_notes_searching = False
+                self.neighbour_notes_mode = "off"
             else:
                 self.include_anacrusis = include_anacrusis_var.get()
                 self.arpeggio_searching = arpeggio_searching_var.get()
-                self.neighbour_notes_searching = neighbour_notes_var.get()
+                # Handle neighbor notes dropdown
+                mode_value = neighbour_mode_var.get()
+                if mode_value == "Off":
+                    self.neighbour_notes_searching = False
+                    self.neighbour_notes_mode = "off"
+                elif mode_value == "Relaxed (default)":
+                    self.neighbour_notes_searching = True
+                    self.neighbour_notes_mode = "relaxed"
+                elif mode_value == "Tight":
+                    self.neighbour_notes_searching = True
+                    self.neighbour_notes_mode = "tight"
+                else:
+                    self.neighbour_notes_searching = True
+                    self.neighbour_notes_mode = "relaxed"
                 
             self.include_non_drive_events = include_non_drive_var.get()
 
@@ -1043,8 +1041,12 @@ class MidiChordAnalyzer(tk.Tk):
                                bg="#ffffff", fg="#000000", font=("Segoe UI", 10),
                                relief="raised", bd=2, width=14)
         
-        # Apply button (right side)
-        apply_btn = tk.Button(button_frame, text="Apply", command=apply_settings,
+        # Apply button (right side) 
+        def apply_and_close():
+            apply_settings()
+            on_close()
+            
+        apply_btn = tk.Button(button_frame, text="Apply", command=apply_and_close,
                              bg="#ffffff", fg="#000000", font=("Segoe UI", 10),
                              relief="raised", bd=2, width=12)
         
@@ -1052,8 +1054,8 @@ class MidiChordAnalyzer(tk.Tk):
         apply_btn.pack(side=tk.RIGHT, padx=(0, 0))
         defaults_btn.pack(side=tk.RIGHT, padx=(5, 5))
 
-        # Set up normal dialog close (no auto-apply)
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        # Set up normal dialog close (no auto-apply) - but still clear reference
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
 
     def display_results(self, lines: list[str] = None):
         self.result_text.config(state="normal")
@@ -1346,10 +1348,14 @@ class MidiChordAnalyzer(tk.Tk):
         # Auto pedal tracking
         auto_pedal_collection = set()  # All pitch classes since last auto pedal lift
         auto_last_lift_time = 0.0
+        
+        # Subdivision tracking for beat divisions (reset for each analysis)
+        beat_subdivisions = {}  # (bar, beat, ts) -> subdivision_counter
+        beat_analysis_history = {}  # (bar, beat, ts) -> [(time, note_set), ...]
 
         # === PHASE 1: Block Chord Detection ===
         for i, time in enumerate(time_points):
-
+            
             # Check if pedal lifts at this time point
             auto_pedal_lift = False
             if self.pedal_mode == "Auto":
@@ -1394,8 +1400,20 @@ class MidiChordAnalyzer(tk.Tk):
             for start, end, pitches in note_events:
                 if end == time:
                     ending_notes.extend(pitches)
-                    active_notes.difference_update({p % 12 for p in pitches})
+                    # Remove individual pitches
                     active_pitches.difference_update(pitches)
+                    
+                    # For active_notes (semitone classes), we need to be more careful
+                    # Only remove a semitone class if NO active pitches contribute to it
+                    for pitch in pitches:
+                        semitone = pitch % 12
+                        # Check if any remaining active pitches contribute this semitone
+                        if not any(p % 12 == semitone for p in active_pitches):
+                            active_notes.discard(semitone)
+                    
+
+                    
+
 
             # Track which notes start at this time        
             starting_notes = []
@@ -1423,45 +1441,262 @@ class MidiChordAnalyzer(tk.Tk):
             test_notes = set(active_notes) | pedal_sustained_notes
             test_pitches = set(active_pitches) | pedal_sustained_pitches
             
+            anacrusis_added_at_time = []
+            anacrusis_candidates_at_time = []
+            
             if self.include_anacrusis:
-                anacrusis_added = []
                 for s_start, s_end, s_pitch in single_notes:
                     # Only include anacrusis notes that were struck as single pitches in isolation
                     # and end exactly when the current chord analysis point occurs
                     # (single_notes already ensures the note was struck alone, not as part of a chord)
-                    if s_end == time and (s_pitch % 12) not in test_notes:
-                        test_notes.add(s_pitch % 12)
-                        test_pitches.add(s_pitch)
-                        anacrusis_added.append(s_pitch)
+                    if s_end == time:
+                        # Check for intervening articulation: any notes starting AFTER anacrusis begins but BEFORE chord analysis time
+                        has_intervening_notes = any(
+                            s_start < note_start < time 
+                            for note_start, _, _ in note_events
+                        )
+                        
+                        if has_intervening_notes:
+                            continue  # Skip anacrusis if there's intervening articulation
+
+                        anacrusis_candidates_at_time.append((s_start, s_end, s_pitch))
 
             if len(test_notes) >= 3:
                 # Check for chord formation with sufficient note count
                 bar, beat, ts = offset_to_bar_beat(time)
                 
+                # === SUBDIVISION DETECTION ===
+                # Detect if significant harmonic change within this beat warrants subdivision
+                beat_key = (bar, beat, ts)
+                subdivision = 1  # Start with .1 (first subdivision)
+                
+                # Initialize history for this beat if first time seeing it
+                if beat_key not in beat_analysis_history:
+                    beat_analysis_history[beat_key] = []
+                    beat_subdivisions[beat_key] = 1
+                
+                # Check if we need to create a subdivision by comparing to previous events in THIS BEAT
+                prev_note_sets_this_beat = beat_analysis_history[beat_key]
+                if prev_note_sets_this_beat:
+                    # Get the most recent note set for this beat in current analysis
+                    prev_time, prev_notes = prev_note_sets_this_beat[-1]
+                    current_notes = test_notes
+                    
+                    # Calculate change metrics
+                    added_notes = current_notes - prev_notes
+                    removed_notes = prev_notes - current_notes
+                    
+                    # Determine if subdivision is warranted
+                    significant_change = False
+                    
+                    # Method 1: Absolute threshold (3+ notes change)
+                    if len(added_notes) + len(removed_notes) >= 3:
+                        significant_change = True
+                        
+                    # Method 2: Percentage threshold (50%+ change) 
+                    if len(prev_notes) > 0:
+                        total_notes = max(len(prev_notes), len(current_notes))
+                        change_percentage = (len(added_notes) + len(removed_notes)) / total_notes
+                        if change_percentage >= 0.5:
+                            significant_change = True
+                            
+                    # Method 3: All notes change (complete harmonic shift)
+                    if len(prev_notes) > 0 and len(current_notes & prev_notes) == 0:
+                        significant_change = True
+                        
+                    if significant_change:
+                        beat_subdivisions[beat_key] += 1
+                        subdivision = beat_subdivisions[beat_key]
+                    else:
+                        subdivision = beat_subdivisions[beat_key]
+                else:
+                    # First event in this beat
+                    subdivision = 1
+                
+                # Record this analysis for future subdivision detection within this beat
+                beat_analysis_history[beat_key].append((time, test_notes.copy()))
+                
+                # Create subdivision-aware beat identifier (as float for sorting compatibility)
+                beat_subdivision = beat if subdivision == 1 else beat + (subdivision / 10.0)
+                
+                # === RULE 1: SIGNIFICANT CHORD CHANGE DETECTION ===
+                # If significant harmonic change occurs, create exact-time event instead of subdivision
+                
+                # Analyze what's happening at this exact time point
+                notes_starting = set()  # Notes that start exactly at this time
+                notes_ending = set()    # Notes that end exactly at this time  
+                notes_continuing = set() # Notes that were already sounding
+                
+                for st, en, prs in note_events:
+                    note_pcs = {p % 12 for p in prs}
+                    
+                    if st == time:  # Notes starting now
+                        notes_starting.update(note_pcs)
+                    elif st < time < en:  # Notes continuing from before
+                        notes_continuing.update(note_pcs)
+                    elif en == time:  # Notes ending now
+                        notes_ending.update(note_pcs)
+                
+                # Calculate significance of harmonic change
+                # Exclude anacrusis notes from the change calculation
+                anacrusis_pcs = {pitch % 12 for _, _, pitch in anacrusis_candidates_at_time}
+                filtered_notes_starting = notes_starting - anacrusis_pcs
+                filtered_notes_ending = notes_ending - anacrusis_pcs
+                filtered_notes_continuing = notes_continuing - anacrusis_pcs
+
+                total_changing_notes = len(filtered_notes_starting) + len(filtered_notes_ending)
+                total_active_notes = len(filtered_notes_starting | filtered_notes_continuing)
+                chord_change_percentage = total_changing_notes / max(total_active_notes, 1)
+                
+                # Additional check: Is this mainly a bass change (Rule 1 exception)?
+                # Identify bass vs upper voice changes
+                all_pitches_starting = set()
+                all_pitches_ending = set()
+                for st, en, prs in note_events:
+                    if st == time:  # Notes starting
+                        all_pitches_starting.update(prs)
+                    elif en == time:  # Notes ending  
+                        all_pitches_ending.update(prs)
+
+                # Remove anacrusis pitches from bass-change calculations
+                anacrusis_pitches = {pitch for _, _, pitch in anacrusis_candidates_at_time}
+                all_pitches_starting -= anacrusis_pitches
+                all_pitches_ending -= anacrusis_pitches
+                
+                # Define bass register as lowest 2-3 notes in the texture
+                all_active_pitches = set()
+                for st, en, prs in note_events:
+                    if st <= time < en or st == time:  # All relevant pitches
+                        all_active_pitches.update(prs)
+
+                # Exclude anacrusis pitches from bass-register detection
+                all_active_pitches -= anacrusis_pitches
+                
+                if all_active_pitches:
+                    sorted_pitches = sorted(all_active_pitches)
+                    bass_register = set(sorted_pitches[:min(3, len(sorted_pitches))])  # Lowest 3 pitches
+                    
+                    # Check how many changing pitches are in bass register
+                    bass_changes = (all_pitches_starting | all_pitches_ending) & bass_register
+                    upper_changes = (all_pitches_starting | all_pitches_ending) - bass_register
+                    
+                    # If most changes are in bass register, this is likely a "no drive" bass change
+                    mainly_bass_change = (len(bass_changes) >= len(upper_changes) and 
+                                        len(upper_changes) <= 1)  # At most 1 upper voice change
+                else:
+                    mainly_bass_change = False
+                
+                # Check Rule 1 criteria: significant chord change BUT NOT mainly bass change
+                significant_harmonic_change = (
+                    (total_changing_notes >= 3 or chord_change_percentage >= 0.5) and 
+                    not mainly_bass_change  # Don't trigger for bass-only changes
+                )
+
+                
+                # Store original test_notes for comparison
+                test_notes_original = test_notes.copy()
+                
+                rule1_applied = False
+
+                # Apply Rule 1: Create exact-time event if significant change
+                if significant_harmonic_change:
+                    # Check if this event already has arpeggio-detected chords that need protection
+                    temp_key = (bar, beat_subdivision, ts)
+                    protect_arpeggio_chords = (temp_key in events and 
+                                             events[temp_key].get("chords"))
+                    
+                    # Also check for nearby arpeggio-detected events that need harmonic continuity
+                    protect_nearby_arpeggios = False
+                    for existing_key, existing_data in events.items():
+                        existing_bar, existing_beat, existing_ts = existing_key
+                        if (existing_bar == bar and 
+                            abs(existing_beat - beat_subdivision) <= 1.0 and
+                            existing_data.get("arpeggio_detected")):
+                            protect_nearby_arpeggios = True
+                            break
+                    
+                    if protect_arpeggio_chords or protect_nearby_arpeggios:
+                        # Don't apply Rule 1 filtering - preserve existing arpeggio harmonic context
+                        key = temp_key
+                    else:
+                        # Rule 1: Don't combine notes artificially - only analyze notes that start at this time
+                        # If no notes start but notes end, skip creating an event (it's just note endings)
+                        if notes_starting:
+                            rule1_applied = True
+                            test_notes = notes_starting.copy()  # Only notes starting now
+                            test_pitches = set()
+                            for st, en, prs in note_events:
+                                if st == time:  # Only notes that start exactly at this time
+                                    test_pitches.update(prs)
+                            
+                            key = (bar, beat_subdivision, ts)  # Use normal key structure
+
+                            # Rule 1 should get a fresh sub-slot if this key already exists
+                            if key in events:
+                                beat_subdivisions[beat_key] += 1
+                                subdivision = beat_subdivisions[beat_key]
+                                beat_subdivision = beat if subdivision == 1 else beat + (subdivision / 10.0)
+                                key = (bar, beat_subdivision, ts)
+                        else:
+                            # No notes starting - skip creating an event for pure note endings
+                            continue  # Skip to next time point
+                else:
+                    # Continue with normal subdivision logic - use all overlapping notes
+                    key = (bar, beat_subdivision, ts)  # Use subdivision-aware beat
+
+                # Apply anacrusis after Rule 1 decision so it cannot trigger Rule 1
+                if self.include_anacrusis and anacrusis_candidates_at_time:
+                    for s_start, s_end, s_pitch in anacrusis_candidates_at_time:
+                        if (s_pitch % 12) not in test_notes:
+                            test_notes.add(s_pitch % 12)
+                            test_pitches.add(s_pitch)
+                            anacrusis_added_at_time.append((s_start, s_end, s_pitch))
+                    
                 # Analyze note collection for chord detection
-                chords = self.detect_chords(test_notes, debug=False)
                 bar, beat, ts = offset_to_bar_beat(time)
-                key = (bar, beat, ts)
+
+                # If anacrusis notes make the current set a subset, inherit prior harmonic context
+                if anacrusis_candidates_at_time and events and not rule1_applied:
+                    prior_key = None
+                    for prev_key in sorted(events.keys(), key=lambda k: (k[0], k[1]), reverse=True):
+                        if prev_key[0] == bar and prev_key[1] < beat:
+                            prior_key = prev_key
+                            break
+                    if prior_key is not None:
+                        prior_event = events.get(prior_key, {})
+                        prior_notes = set(prior_event.get("event_notes", set()))
+                        if prior_notes and set(test_notes).issubset(prior_notes):
+                            test_notes.update(prior_notes)
+                            test_pitches.update(prior_event.get("event_pitches", set()))
+                
+                chords = self.detect_chords(test_notes, debug=False)
+                # Key has already been set by Rule 1 logic above
                 # Event created; previously had diagnostic printing here which has been removed
                 if chords:
                     bass_note = self.semitone_to_note(min(test_pitches) % 12)
                     if key not in events:
-                        events[key] = {"chords": set(), "basses": set(), "event_notes": set(test_notes)}
-
+                        events[key] = {
+                            "chords": set(),
+                            "basses": set(),
+                            "event_notes": set(test_notes),
+                            "anacrusis_influenced": False,
+                        }
+                    events[key].setdefault("offset", time)
+                    if rule1_applied:
+                        events[key]["rule1_event"] = True
+                    else:
+                        events[key].setdefault("rule1_event", False)
                     
                     events[key]["chords"].update(chords)
                     events[key]["basses"].add(bass_note)
-                    
-                    events[key]["event_notes"] = set(test_notes)
-                    
-
-                    events[key]["event_pitches"] = set(test_pitches)
-                else:
-                    # No recognized chord, but 3+ notes: still set bass to lowest pitch
-                    bass_note = self.semitone_to_note(min(test_pitches) % 12)
-                    if key not in events:
-                        events[key] = {"chords": set(), "basses": set(), "event_notes": set(test_notes), "event_pitches": set(test_pitches)}
-                    events[key]["basses"].add(bass_note)
+                    events[key]["event_notes"].update(test_notes)  # UNION instead of overwrite
+                    if "event_pitches" not in events[key]:
+                        events[key]["event_pitches"] = set()
+                    events[key]["event_pitches"].update(test_pitches)  # UNION instead of overwrite
+                    if anacrusis_candidates_at_time:
+                        events[key]["anacrusis_influenced"] = True
+                # Option A: Suppress empty events - don't create bass-only subdivisions
+                # These typically occur when sustained chords are active elsewhere
 
         # === PHASE 2: Arpeggio Pattern Detection ===
         if self.arpeggio_searching:
@@ -1481,7 +1716,10 @@ class MidiChordAnalyzer(tk.Tk):
                     window_pcs = {p % 12 for p in window_pitches}
                     if len(window_pcs) < 3:
                         continue
-                    chords = self.detect_chords(window_pcs, debug=True)
+                    chords = self.detect_chords(window_pcs, debug=False)
+                    # Reject ambiguous arpeggios that match multiple chords
+                    if len(chords) > 1:
+                        continue
                     if chords:
                         # Display arpeggio analysis for specified range
                         bar, beat, ts = offset_to_bar_beat(window[0].offset)
@@ -1492,14 +1730,17 @@ class MidiChordAnalyzer(tk.Tk):
                         for note_elem in window:
                             note_bar, note_beat, note_ts = offset_to_bar_beat(note_elem.offset)
                             note_key = (note_bar, note_beat, note_ts)
-                            existing_chords = events.get(note_key, {}).get('chords', set())
+                            existing_event = events.get(note_key, {})
+                            if existing_event.get("anacrusis_influenced"):
+                                continue
+                            existing_chords = existing_event.get('chords', set())
                             if existing_chords:
                                 underlying_chords.append((note_key, existing_chords))
                         
                         # Decision logic:
-                        # 1. No block chords throughout span → Accept arpeggio
-                        # 2. Same block chord throughout span → Accept arpeggio  
-                        # 3. Different block chords in span → Reject arpeggio
+                        # 1. No block chords throughout span -> Accept arpeggio
+                        # 2. Same block chord throughout span -> Accept arpeggio  
+                        # 3. Different block chords in span -> Reject arpeggio
                         harmonic_stability = True
                         if underlying_chords:
                             # Check if all underlying chords are the same
@@ -1535,25 +1776,55 @@ class MidiChordAnalyzer(tk.Tk):
                                 continue
                         # Accept arpeggio event
                         if key not in events:
-                            events[key] = {"chords": set(), "basses": set(), "event_notes": set(window_pcs)}
+                            events[key] = {
+                                "chords": set(),
+                                "basses": set(),
+                                "event_notes": set(),
+                                "event_pitches": set(),
+                            }
+                        events[key].setdefault("offset", window[0].offset)
+                        events[key]["arpeggio_detected"] = True
                         events[key]["chords"].update(chords)
                         # Arpeggios contribute to chord identification but not bass detection
                         # Bass detection relies on actual bass line or block chord voicings
-                        events[key]["event_notes"] = set(window_pcs)
-                        events[key]["event_pitches"] = set(window_pitches)
+                        events[key]["event_notes"].update(window_pcs)
+                        events[key]["event_pitches"].update(window_pitches)
+                        
+                        # When arpeggio is detected, restore full harmonic context to prevent Rule 1 interference
+                        # Find all notes overlapping this time point and add them back
+                        arp_start_time = float(window[0].offset)
+                        for st_all, en_all, prs_all in note_events:
+                            # Include notes that overlap with the arpeggio time point
+                            if st_all <= arp_start_time < en_all:
+                                events[key]["event_notes"].update(p % 12 for p in prs_all)
+                                events[key]["event_pitches"].update(prs_all)
+                        
                         events[key]["chords"].update(chords)
-                        events[key]["basses"].add(self.semitone_to_note(min(window_pitches) % 12))
-                        events[key]["event_notes"] = set(window_pcs)
-                        events[key]["event_pitches"] = set(window_pitches)
+                        events[key]["event_notes"].update(window_pcs)
+                        events[key]["event_pitches"].update(window_pitches)
 
-
-
+                        # Propagate arpeggio chords across the span to keep continuity
+                        arp_start = float(window[0].offset)
+                        arp_end = float(window[-1].offset)
+                        if arp_end < arp_start:
+                            arp_start, arp_end = arp_end, arp_start
+                        for span_key, span_event in events.items():
+                            span_offset = span_event.get("offset")
+                            if span_offset is None:
+                                continue
+                            if arp_start <= float(span_offset) <= arp_end:
+                                span_event.setdefault("event_pitches", set())
+                                span_event["chords"].update(chords)
+                                span_event["event_notes"].update(window_pcs)
+                                span_event["event_pitches"].update(window_pitches)
 
         # === PHASE 3: Neighbor/Passing Note Detection ===
         # NEW ALGORITHM: Detect harmonic stability with melodic change
         # Look for cases where exactly one note changes while 2+ others are retained,
         # and BIND related events together at the foundational timing
+            
         if getattr(self, 'neighbour_notes_searching', False):
+            
             # Group all note events by bar for boundary respect
             notes_by_bar = {}
             for st, en, prs in note_events:
@@ -1564,6 +1835,9 @@ class MidiChordAnalyzer(tk.Tk):
             
             # Track events to merge - store as {early_key: [later_keys_to_merge]}
             events_to_bind = {}
+            
+            # For tight mode: track consecutive single-note changes to reject sequences
+            consecutive_changes = {}  # {bar_num: [(time, old_note, new_note), ...]}
             
             # Process each bar separately
             for bar_num, bar_notes in notes_by_bar.items():
@@ -1605,6 +1879,7 @@ class MidiChordAnalyzer(tk.Tk):
                             old_note = list(removed)[0]
                             new_note = list(added)[0]
                             
+                            # First, perform initial chord detection for both basic and enhanced analysis
                             # Evaluate chord formation with note substitution
                             test_pcs = {old_note, new_note} | retained
                             
@@ -1628,61 +1903,180 @@ class MidiChordAnalyzer(tk.Tk):
                             # Include passing notes for enhanced chord analysis
                             enhanced_test_pcs = test_pcs | passing_pcs
                             
-                            if len(enhanced_test_pcs) >= 4:  # Need at least 4 notes for seventh chord
-                                # Try both versions and prefer the enhanced one if it produces better chords
-                                basic_chords = self.detect_chords(test_pcs, debug=False)
-                                enhanced_chords = self.detect_chords(enhanced_test_pcs, debug=False)
+                            # Always detect chords for both basic and enhanced note sets (regardless of count)
+                            basic_chords = self.detect_chords(test_pcs, debug=False)
+                            enhanced_chords = self.detect_chords(enhanced_test_pcs, debug=False)
+                            
+                            # Check which chord analysis to use (moved outside the >=4 condition)
+                            # Use enhanced version if it found chords, otherwise fall back to basic
+                            initial_final_chords = enhanced_chords if enhanced_chords else basic_chords
+                            initial_final_test_pcs = enhanced_test_pcs if enhanced_chords else test_pcs
+                            
+                            # For tight mode: check if detected chord tones are temporally adjacent
+                            if getattr(self, 'neighbour_notes_mode', 'relaxed') == 'tight':
+                                # Use the chords already detected above
+                                candidate_chords = initial_final_chords
                                 
-                                # Use enhanced version if it found chords, otherwise fall back to basic
-                                final_chords = enhanced_chords if enhanced_chords else basic_chords
-                                final_test_pcs = enhanced_test_pcs if enhanced_chords else test_pcs
+                                if candidate_chords:
+                                    # Check if chord tones in the enhanced sequence are separated by non-chord-tones
+                                    valid_chords = []
+                                    for chord_name in candidate_chords:
+                                        chord_tones = self.get_chord_tones(chord_name, initial_final_test_pcs)
+                                        non_chord_tones = initial_final_test_pcs - chord_tones
+                                        
+                                        # Build temporal sequence of all notes that contribute to enhanced chord
+                                        # This should span the full duration of the retained notes, not just the neighbor transition
+                                        temporal_sequence = []
+                                        
+                                        # Find the full time span of enhanced chord formation
+                                        enhanced_start = current_time
+                                        enhanced_end = next_time
+                                        
+                                        # Extend end time to cover retained note duration
+                                        for st, en, prs in bar_notes:
+                                            if st <= current_time < en:
+                                                pitch_classes = {p % 12 for p in prs}
+                                                if pitch_classes & retained:  # If this contributes to retained notes
+                                                    enhanced_end = max(enhanced_end, en)
+                                        
+                                        # Collect all notes in enhanced test set that sound during this period
+                                        for st, en, prs in bar_notes:
+                                            if enhanced_start <= st < enhanced_end or (st <= enhanced_start < en and en <= enhanced_end) or (st <= enhanced_start and en > enhanced_end):
+                                                for pc in {p % 12 for p in prs}:
+                                                    if pc in initial_final_test_pcs:
+                                                        temporal_sequence.append((st, pc))
+                                        
+                                        # Sort by time to get proper sequence
+                                        temporal_sequence = sorted(temporal_sequence)
+                                        
+                                        # Group by time points to see the progression
+                                        time_groups = {}
+                                        for time, pc in temporal_sequence:
+                                            if time not in time_groups:
+                                                time_groups[time] = set()
+                                            time_groups[time].add(pc)
+                                        
+                                        # Check if chord tones are separated by non-chord-tones in time
+                                        has_separation = False
+                                        time_points_ordered = sorted(time_groups.keys())
+                                        
+                                        # Look for chord tones separated by non-chord-tones across time points
+                                        for i in range(len(time_points_ordered) - 1):
+                                            current_notes = time_groups[time_points_ordered[i]]
+                                            next_notes = time_groups[time_points_ordered[i + 1]]
+                                            
+                                            current_chord_tones = current_notes & chord_tones
+                                            next_chord_tones = next_notes & chord_tones
+                                            next_non_chord_tones = next_notes & non_chord_tones
+                                            
+                                            # If we have chord tones at current time and non-chord-tones at next time
+                                            # and then chord tones at a later time, that's separation
+                                            if current_chord_tones and next_non_chord_tones:
+                                                # Check if there are chord tones at any later time point
+                                                for j in range(i + 2, len(time_points_ordered)):
+                                                    later_notes = time_groups[time_points_ordered[j]]
+                                                    later_chord_tones = later_notes & chord_tones
+                                                    
+                                                    if later_chord_tones:
+                                                        has_separation = True
+                                                        break
+                                            
+                                            if has_separation:
+                                                break
+                                        
+                                        if not has_separation:
+                                            valid_chords.append(chord_name)
+                                    
+                                    if valid_chords:
+                                        final_chords = valid_chords
+                                        final_test_pcs = initial_final_test_pcs
+                                    else:
+                                        continue
+                                else:
+                                    continue  # No chords detected
+                            else:
+                                # Relaxed mode - use normal logic
+                                final_chords = initial_final_chords
+                                final_test_pcs = initial_final_test_pcs
+                            
+
+                            
+                            # Create events if we have valid chords
+                            if final_chords:
                                 
-                                if final_chords:
-                                    
-                                    # Find the foundational event (earliest time with retained notes)
-                                    foundation_time = current_time
-                                    foundation_bar, foundation_beat, foundation_ts = offset_to_bar_beat(foundation_time)
-                                    foundation_key = (foundation_bar, foundation_beat, foundation_ts)
-                                    
-                                    # Find the completion event (when new note appears)
-                                    completion_time = next_time
-                                    completion_bar, completion_beat, completion_ts = offset_to_bar_beat(completion_time)
-                                    completion_key = (completion_bar, completion_beat, completion_ts)
-                                    
-                                    # Plan to bind completion event into foundation event
-                                    if foundation_key not in events_to_bind:
-                                        events_to_bind[foundation_key] = []
-                                    if completion_key != foundation_key:
-                                        events_to_bind[foundation_key].append(completion_key)
-                                    
-                                    # Enhance the foundation event with the discovered chords
-                                    if foundation_key not in events:
-                                        events[foundation_key] = {"chords": set(), "basses": set(), "event_notes": set()}
-                                    events[foundation_key]["chords"].update(final_chords)
-                                    events[foundation_key]["event_notes"].update(final_test_pcs)
-            
+                                # Find the foundational event (earliest time with retained notes)
+                                foundation_time = current_time
+                                foundation_bar, foundation_beat, foundation_ts = offset_to_bar_beat(foundation_time)
+                                foundation_key = (foundation_bar, foundation_beat, foundation_ts)
+                                
+                                # Find the completion event (when new note appears)
+                                completion_time = next_time
+                                completion_bar, completion_beat, completion_ts = offset_to_bar_beat(completion_time)
+                                completion_key = (completion_bar, completion_beat, completion_ts)
+                                
+
+                                
+                                # Plan to bind completion event into foundation event
+                                if foundation_key not in events_to_bind:
+                                    events_to_bind[foundation_key] = []
+                                if completion_key != foundation_key:
+                                    events_to_bind[foundation_key].append(completion_key)
+                                
+                                # Enhance the foundation event with the discovered chords
+                                if foundation_key not in events:
+                                    events[foundation_key] = {"chords": set(), "basses": set(), "event_notes": set()}
+                                events[foundation_key]["chords"].update(final_chords)
+                                events[foundation_key]["event_notes"].update(final_test_pcs)
+                            
+                            
             # Execute the binding: merge later events into foundation events
             for foundation_key, completion_keys in events_to_bind.items():
+                foundation_bar, foundation_beat, foundation_ts = foundation_key
+                
                 if foundation_key in events:
                     for completion_key in completion_keys:
+                        completion_bar, completion_beat, completion_ts = completion_key
                         if completion_key in events:
-                            # Merge the completion event into the foundation event
+                            if events[completion_key].get("rule1_event"):
+                                continue
                             completion_event = events[completion_key]
-                            if foundation_key[0] == 3 and foundation_key[1] == 1:
-                                print(f"DEBUG NEIGHBOR MERGE: Merging completion {completion_key} -> foundation {foundation_key}")
-                                print(f"  Before: foundation chords = {events[foundation_key].get('chords', set())}")
-                                print(f"  Adding: completion chords = {completion_event.get('chords', set())}")
-                            events[foundation_key]["chords"].update(completion_event.get("chords", set()))
-                            events[foundation_key]["basses"].update(completion_event.get("basses", set()))
-                            events[foundation_key]["event_notes"].update(completion_event.get("event_notes", set()))
-                            events[foundation_key]["event_pitches"] = events[foundation_key].get("event_pitches", set()) | completion_event.get("event_pitches", set())
-                            if foundation_key[0] == 3 and foundation_key[1] == 1:
-                                print(f"  After: foundation chords = {events[foundation_key].get('chords', set())}")
-                            
+                            # For Rule 1 foundations, preserve the harmonic set but merge bass/notes
+                            if events[foundation_key].get("rule1_event"):
+                                events[foundation_key]["basses"].update(completion_event.get("basses", set()))
+                                events[foundation_key]["event_notes"].update(completion_event.get("event_notes", set()))
+                                events[foundation_key]["event_pitches"] = events[foundation_key].get("event_pitches", set()) | completion_event.get("event_pitches", set())
+                            else:
+                                # Merge the completion event into the foundation event
+                                events[foundation_key]["chords"].update(completion_event.get("chords", set()))
+                                events[foundation_key]["basses"].update(completion_event.get("basses", set()))
+                                events[foundation_key]["event_notes"].update(completion_event.get("event_notes", set()))
+                                events[foundation_key]["event_pitches"] = events[foundation_key].get("event_pitches", set()) | completion_event.get("event_pitches", set())
                             # Remove the completion event since it's now merged
                             del events[completion_key]
         if not events:
             return ["No matching chords found."], {}
+
+        # Final pass: carry chords into anacrusis events after all merges
+        ordered_keys = sorted(events.keys(), key=lambda k: (k[0], k[1]))
+        for idx, key in enumerate(ordered_keys):
+            curr_event = events.get(key, {})
+            if not curr_event.get("anacrusis_influenced"):
+                continue
+            curr_basses = set(curr_event.get("basses", set()))
+            for prev_idx in range(idx - 1, -1, -1):
+                prev_key = ordered_keys[prev_idx]
+                if prev_key[0] != key[0]:
+                    break
+                if abs(key[1] - prev_key[1]) > 1.0:
+                    break
+                prev_event = events.get(prev_key, {})
+                prev_notes = set(prev_event.get("event_notes", set()))
+                curr_notes = set(curr_event.get("event_notes", set()))
+                notes_subset = bool(prev_notes) and bool(curr_notes) and curr_notes.issubset(prev_notes)
+                bass_match = bool(curr_basses) and bool(curr_basses & set(prev_event.get("basses", set())))
+                if prev_event.get("arpeggio_detected") or (notes_subset and bass_match):
+                    curr_event["chords"].update(prev_event.get("chords", set()))
+                    break
 
         return self._process_detected_events(events)
 
@@ -2108,6 +2502,74 @@ class MidiChordAnalyzer(tk.Tk):
             }
         return output_lines, filtered_events
 
+    
+    def get_chord_tones(self, chord_name, note_set):
+        """
+        Extract the actual chord tones from a note set that contribute to the named chord.
+        Returns the subset of notes that are essential to the chord.
+        """
+        if not chord_name or not note_set:
+            return set()
+        
+        # Parse chord to get root and chord type
+        import re
+        
+        # Extract root note
+        root_match = re.match(r'^([A-G][#♭b]?)', chord_name)
+        if not root_match:
+            return set()
+        
+        root_name = root_match.group(1)
+        # Convert to pitch class
+        note_map = {'C': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3, 'E': 4, 'F': 5, 
+                   'F#': 6, 'Gb': 6, 'G': 7, 'G#': 8, 'Ab': 8, 'A': 9, 'A#': 10, 'Bb': 10, 'B': 11,
+                   'C♭': 11, 'B#': 0, 'D♭': 1, 'E♭': 3, 'F♭': 4, 'E#': 5, 'G♭': 6, 'A♭': 8, 'B♭': 10}
+        
+        root_pc = note_map.get(root_name)
+        if root_pc is None:
+            return set()
+        
+        # Define basic chord tone intervals (relative to root)
+        chord_patterns = {
+            # Major chords
+            'maj': [0, 4, 7],
+            '': [0, 4, 7],  # Plain major
+            '7': [0, 4, 7, 10],
+            'maj7': [0, 4, 7, 11],
+            # Minor chords  
+            'm': [0, 3, 7],
+            'm7': [0, 3, 7, 10],
+            'min': [0, 3, 7],
+            # Diminished
+            'dim': [0, 3, 6],
+            '°': [0, 3, 6],
+            'ø7': [0, 3, 6, 10],  # half-diminished
+            # Augmented
+            'aug': [0, 4, 8],
+            '+': [0, 4, 8],
+        }
+        
+        # Get chord type from chord name (everything after root)
+        chord_type = chord_name[len(root_name):]
+        
+        # Find matching pattern - sort by length descending to check longest patterns first
+        intervals = None
+        sorted_patterns = sorted(chord_patterns.items(), key=lambda x: -len(x[0]))
+        for pattern_name, pattern_intervals in sorted_patterns:
+            if chord_type.startswith(pattern_name):
+                intervals = pattern_intervals
+                break
+        
+        if intervals is None:
+            # Default to major triad if no pattern found
+            intervals = [0, 4, 7]
+        
+        # Calculate actual chord tone pitch classes
+        chord_tone_pcs = {(root_pc + interval) % 12 for interval in intervals}
+        
+        # Return intersection with the provided note set
+        return chord_tone_pcs & note_set
+
     def detect_chords(self, semitones, debug: bool = False):
         """
         Detect chord names from pitch classes using pattern matching.
@@ -2120,7 +2582,7 @@ class MidiChordAnalyzer(tk.Tk):
 
         chords_found = []
         semitone_list = sorted(set(semitones))
-
+        
         # First pass: try candidate roots that are present in the set
         for root in sorted(set(semitones)):
             normalized = {(n - root) % 12 for n in semitones}
@@ -2149,6 +2611,7 @@ class MidiChordAnalyzer(tk.Tk):
                 if full_name not in CHORDS:
                     continue
                 chord_pattern = set(CHORDS[full_name])
+                
                 # Special handling for 'no3' chords: only match if third is truly absent
                 if "no3" in name:
                     third_major = (root + 4) % 12
@@ -2779,13 +3242,10 @@ class EmbeddedMidiKeyboard:
         try:
             if MIDO_AVAILABLE:
                 ports = mido.get_input_names()
-                debug_log(f"MIDI Debug: Found {len(ports)} MIDI ports: {ports}")
                 return ports
             else:
-                debug_log("MIDI Debug: mido not available")
                 return []
         except Exception as e:
-            debug_log(f"MIDI Debug: Error getting MIDI ports: {e}")
             return []
 
     def _delayed_midi_init(self):
@@ -3204,11 +3664,11 @@ class GridWindow(tk.Toplevel):
         
         # Use platform-appropriate monospace fonts for better column alignment
         if platform.system() == "Darwin":  # Mac
-            mono_font = ("Monaco", 10)
+            mono_font = ("Monaco", 12)
         elif platform.system() == "Windows":
-            mono_font = ("Consolas", 10)
+            mono_font = ("Consolas", 12)
         else:  # Linux
-            mono_font = ("DejaVu Sans Mono", 10)
+            mono_font = ("DejaVu Sans Mono", 12)
             
         # Create scrollable text frame
         text_frame = tk.Frame(info_win, bg="white")
@@ -4344,6 +4804,10 @@ class DriveStrengthParametersDialog:
             tooltip_window_ref = [None]  # Use list to allow modification in nested functions
             
             def show_tooltip(event, tooltip_text=tooltip):
+                # Check if event.widget is valid
+                if not hasattr(event, 'widget') or not hasattr(event.widget, 'winfo_rootx'):
+                    return
+                    
                 # Hide any existing tooltip first
                 if tooltip_window_ref[0]:
                     try:
@@ -4808,11 +5272,11 @@ class EntropyAnalyzer:
                 if chord in prev_event_chords:
                     rule6_same = self.rule_params.get("rule6_same_chord", 5)
                     rule6_bonus += rule6_same
-                    applied_rules.append(f"Rule 6: Previous event contained {chord} → +{rule6_same}")
+                    applied_rules.append(f"Rule 6: Previous event contained {chord} -> +{rule6_same}")
                 if dominant_chord in prev_event_chords:
                     rule6_dom = self.rule_params.get("rule6_dominant_prep", 10)
                     rule6_bonus += rule6_dom
-                    applied_rules.append(f"Rule 6: Previous event contained dominant {dominant_chord} → +{rule6_dom}")
+                    applied_rules.append(f"Rule 6: Previous event contained dominant {dominant_chord} -> +{rule6_dom}")
                 base_score += rule6_bonus
 
                 # Rule 4: proportional resolution
@@ -4821,7 +5285,7 @@ class EntropyAnalyzer:
                     rule4_max = self.rule_params.get("rule4_resolution_max", 10)
                     r4_bonus = rule4_max * ratio
                     if r4_bonus > 0:
-                        applied_rules.append(f"Rule 4: Resolution ratio {ratio:.2f} → +{int(round(r4_bonus))}")
+                        applied_rules.append(f"Rule 4: Resolution ratio {ratio:.2f} -> +{int(round(r4_bonus))}")
                     base_score += r4_bonus
 
                 chord_scores.append((chord, base_score, applied_rules))
@@ -4976,7 +5440,7 @@ class EntropyAnalyzer:
         if basses and root in basses:
             rule1_bonus = self.rule_params.get("rule1_bass_support", 20)
             score += rule1_bonus
-            messages.append(f"Rule 1: Bass supports {chord} → +{rule1_bonus} bonus")
+            messages.append(f"Rule 1: Bass supports {chord} -> +{rule1_bonus} bonus")
 
         # Rule 2: Tonic-Dominant relationship
         selected_tonic = self.rule_params.get("rule2_selected_tonic", "No Tonic")
@@ -4985,7 +5449,7 @@ class EntropyAnalyzer:
             if root == dominant_of_tonic:
                 rule2_bonus = self.rule_params.get("rule2_tonic_dominant", 50)
                 score += rule2_bonus
-                messages.append(f"Rule 2: {chord} is dominant of {selected_tonic} → +{rule2_bonus} bonus")
+                messages.append(f"Rule 2: {chord} is dominant of {selected_tonic} -> +{rule2_bonus} bonus")
 
         # Rule 3: root repetition (now always included)
         if root_counter is not None:
@@ -4993,7 +5457,7 @@ class EntropyAnalyzer:
             rule3_multiplier = self.rule_params.get("rule3_root_repetition", 2)
             r3_bonus = rule3_multiplier * prev_count if prev_count > 0 else 0
             if r3_bonus > 0:
-                messages.append(f"Rule 3: Root {root} repeated → +{r3_bonus}")
+                messages.append(f"Rule 3: Root {root} repeated -> +{r3_bonus}")
             score += r3_bonus
 
         if event_payload is not None:
@@ -5002,17 +5466,17 @@ class EntropyAnalyzer:
             if chord_info.get(chord, {}).get("clean_stack"):
                 rule5_bonus = self.rule_params.get("rule5_clean_voicing", 10)
                 score += rule5_bonus
-                messages.append(f"Rule 5: Clean chord {chord} → +{rule5_bonus} bonus")
+                messages.append(f"Rule 5: Clean chord {chord} -> +{rule5_bonus} bonus")
             # Rule 7
             root_count = chord_info.get(chord, {}).get("root_count", 1)
             if root_count == 2:
                 rule7_doubled = self.rule_params.get("rule7_root_doubled", 5)
                 score += rule7_doubled
-                messages.append(f"Rule 7: Root doubled in chord {chord} → +{rule7_doubled} bonus")
+                messages.append(f"Rule 7: Root doubled in chord {chord} -> +{rule7_doubled} bonus")
             elif root_count >= 3:
                 rule7_tripled = self.rule_params.get("rule7_root_tripled", 10)
                 score += rule7_tripled
-                messages.append(f"Rule 7: Root tripled+ in chord {chord} → +{rule7_tripled} bonus")
+                messages.append(f"Rule 7: Root tripled+ in chord {chord} -> +{rule7_tripled} bonus")
 
         return score, messages
 
@@ -5073,10 +5537,5 @@ class EntropyAnalyzer:
     # Legend print handled in step_stage1_strengths
 
 if __name__ == "__main__":
-    debug_log("=== Application Starting ===")
-    debug_log(f"Python version: {sys.version}")
-    debug_log(f"Platform: {platform.platform()}")
-    debug_log(f"MIDO_AVAILABLE: {MIDO_AVAILABLE}")
-    debug_log(f"PYGAME_AVAILABLE: {PYGAME_AVAILABLE}")
     app = MidiChordAnalyzer()
     app.mainloop()
