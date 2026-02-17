@@ -211,6 +211,7 @@ class MidiChordAnalyzer(tk.Tk):
         self.include_anacrusis = True
         self.include_non_drive_events = True
         self.arpeggio_searching = True
+        self.arpeggio_mode = "tight"  # "off", "tight", "relaxed" 
         self.neighbour_notes_searching = True
         self.neighbour_notes_mode = "relaxed"  # "off", "relaxed", or "tight"
         self.arpeggio_block_similarity_threshold = 0.5
@@ -1699,30 +1700,64 @@ class MidiChordAnalyzer(tk.Tk):
                 # These typically occur when sustained chords are active elsewhere
 
         # === PHASE 2: Arpeggio Pattern Detection ===
-        if self.arpeggio_searching:
+        if self.arpeggio_searching and self.arpeggio_mode != "off":
             # Build a list of all single notes (not chords) sorted by onset
             melodic_notes = [elem for elem in flat_notes if isinstance(elem, note.Note)]
             melodic_notes = sorted(melodic_notes, key=lambda n: n.offset)
             
             window_sizes = [3, 4]
             for w in window_sizes:
-                for i in range(len(melodic_notes) - w + 1):
-                    window = melodic_notes[i:i+w]
-                    window_offsets = [n.offset for n in window]
-                    # Only consider windows with strictly increasing onsets
-                    if any(window_offsets[j] >= window_offsets[j+1] for j in range(w-1)):
-                        continue
-                    window_pitches = [n.pitch.midi for n in window]
-                    window_pcs = {p % 12 for p in window_pitches}
-                    if len(window_pcs) < 3:
-                        continue
-                    chords = self.detect_chords(window_pcs, debug=False)
-                    # Reject ambiguous arpeggios that match multiple chords
-                    if len(chords) > 1:
-                        continue
-                    if chords:
-                        # Display arpeggio analysis for specified range
-                        bar, beat, ts = offset_to_bar_beat(window[0].offset)
+                if self.arpeggio_mode == "tight":
+                    # TIGHT: Consecutive notes only
+                    for i in range(len(melodic_notes) - w + 1):
+                        window = melodic_notes[i:i+w]
+                        self._process_arpeggio_window(window, events, note_events, offset_to_bar_beat)
+                        
+                elif self.arpeggio_mode == "relaxed":
+                    # RELAXED: Allow one intervening note
+                    # First try all consecutive patterns (same as tight)
+                    for i in range(len(melodic_notes) - w + 1):
+                        window = melodic_notes[i:i+w]
+                        self._process_arpeggio_window(window, events, note_events, offset_to_bar_beat)
+                    
+                    # Then try patterns with one intervening note
+                    # Take w+1 consecutive notes, try all combinations of w notes
+                    for i in range(len(melodic_notes) - w):
+                        extended_window = melodic_notes[i:i+w+1]  # e.g., F-A-Gb-C (4 notes)
+                        
+                        # Try all combinations of w notes from extended window
+                        from itertools import combinations
+                        for combo in combinations(extended_window, w):
+                            # Maintain the temporal order
+                            window = list(combo)
+                            self._process_arpeggio_window(window, events, note_events, offset_to_bar_beat)
+                            
+    def _process_arpeggio_window(self, window, events, note_events, offset_to_bar_beat):
+        """Process a potential arpeggio window and add to events if valid."""
+        window_offsets = [n.offset for n in window]
+        # Only consider windows with strictly increasing onsets
+        if any(window_offsets[j] >= window_offsets[j+1] for j in range(len(window)-1)):
+            return
+            
+        window_pitches = [n.pitch.midi for n in window]
+        window_pcs = {p % 12 for p in window_pitches}
+        if len(window_pcs) < 3:
+            return
+            
+        chords = self.detect_chords(window_pcs, debug=False)
+        # Reject ambiguous arpeggios that match multiple chords
+        if len(chords) > 1:
+            return
+        if chords:
+            # DEBUG: Track arpeggio triggers and components for first 10 bars
+            bar, _, _ = offset_to_bar_beat(window[0].offset)
+            if bar <= 10:
+                note_names = [self.semitone_to_note(n.pitch.midi % 12) for n in window]
+                midi_notes = [n.pitch.midi for n in window]
+                pc_names = [self.semitone_to_note(pc) for pc in sorted(window_pcs)]
+                print(f"[ARPEGGIO] BAR {bar}: window_size={len(window)}, notes={note_names} (MIDI={midi_notes}), pcs={pc_names} ({window_pcs}), detected_chord={chords}")
+            # Display arpeggio analysis for specified range
+            bar, beat, ts = offset_to_bar_beat(window[0].offset)
                         
                         # HARMONIC STABILITY CHECK: Only accept arpeggio if underlying harmony is stable
                         # Check all time points in the arpeggio window for existing block chords
@@ -1751,27 +1786,7 @@ class MidiChordAnalyzer(tk.Tk):
                                     break
                         
                         if not harmonic_stability:
-                            continue  # Skip this arpeggio
-                        
-                        # Before accepting arpeggio detection, compare to any simultaneous block event
-                        key = (bar, beat, ts)
-                        block_pcs = events.get(key, {}).get('event_notes', set())
-                        if block_pcs:
-                            union = window_pcs | block_pcs
-                            inter = window_pcs & block_pcs
-                            jaccard = (len(inter) / len(union)) if union else 0.0
-                            # Evaluate arpeggio acceptance criteria
-                            # Accept arpeggio if Jaccard passes OR if the detected arpeggio chord's root is present in the simultaneous block_pcs
-                            accept_arpeggio = False
-                            if jaccard >= getattr(self, 'arpeggio_block_similarity_threshold', 0.5):
-                                accept_arpeggio = True
-                            else:
-                                # check whether any detected chord root is present in block_pcs
-                                for chord_name in chords:
-                                    root = next((n for n in sorted(NOTE_TO_SEMITONE.keys(), key=lambda x: -len(x)) if chord_name.startswith(n)), None)
-                                    if root is not None and (NOTE_TO_SEMITONE.get(root) % 12) in block_pcs:
-                                        accept_arpeggio = True
-                                        break
+                return  # Skip this arpeggio
                             if not accept_arpeggio:
                                 continue
                         # Accept arpeggio event
@@ -1784,11 +1799,15 @@ class MidiChordAnalyzer(tk.Tk):
                             }
                         events[key].setdefault("offset", window[0].offset)
                         events[key]["arpeggio_detected"] = True
-                        events[key]["chords"].update(chords)
-                        # Arpeggios contribute to chord identification but not bass detection
-                        # Bass detection relies on actual bass line or block chord voicings
+                        
+                        # Collect arpeggio notes
                         events[key]["event_notes"].update(window_pcs)
                         events[key]["event_pitches"].update(window_pitches)
+                        
+                        # DEBUG - before harmonic context restore
+                        if bar <= 10:
+                            pcs_before = events[key]["event_notes"].copy() if events[key].get("event_notes") else set()
+                            print(f"   |-- Before harmonic context restore: event_notes={pcs_before}")
                         
                         # When arpeggio is detected, restore full harmonic context to prevent Rule 1 interference
                         # Find all notes overlapping this time point and add them back
@@ -1796,14 +1815,37 @@ class MidiChordAnalyzer(tk.Tk):
                         for st_all, en_all, prs_all in note_events:
                             # Include notes that overlap with the arpeggio time point
                             if st_all <= arp_start_time < en_all:
-                                events[key]["event_notes"].update(p % 12 for p in prs_all)
+                                new_pcs = {p % 12 for p in prs_all}
+                                events[key]["event_notes"].update(new_pcs)
                                 events[key]["event_pitches"].update(prs_all)
+                                # DEBUG - show what was added
+                                if bar <= 10:
+                                    added = new_pcs - pcs_before
+                                    if added:
+                                        print(f"   |-- Harmonic context restore added pcs: {added} from note_event (st={st_all}, en={en_all})")
                         
-                        events[key]["chords"].update(chords)
+                        # DEBUG - after harmonic context restore
+                        if bar <= 10:
+                            pcs_after = events[key]["event_notes"]
+                            print(f"   |-- After harmonic context restore: event_notes={pcs_after}")
+                        
+                        # NOW detect chords from the COMBINED note set (arpeggio + harmonic context)
+                        combined_pcs = events[key]["event_notes"]
+                        combined_chords = self.detect_chords(combined_pcs, debug=False)
+                        
+                        # DEBUG - show combined chord detection result
+                        if bar <= 10:
+                            print(f"   |-- Combined chord detection on {combined_pcs}: {combined_chords}")
+                        
+                        # Use the combined chord detection result
+                        events[key]["chords"].update(combined_chords)
+                        
+                        # Update event notes again to ensure consistency
                         events[key]["event_notes"].update(window_pcs)
                         events[key]["event_pitches"].update(window_pitches)
 
                         # Propagate arpeggio chords across the span to keep continuity
+                        # Use the combined chords for propagation
                         arp_start = float(window[0].offset)
                         arp_end = float(window[-1].offset)
                         if arp_end < arp_start:
@@ -1814,9 +1856,13 @@ class MidiChordAnalyzer(tk.Tk):
                                 continue
                             if arp_start <= float(span_offset) <= arp_end:
                                 span_event.setdefault("event_pitches", set())
-                                span_event["chords"].update(chords)
+                                span_event["chords"].update(combined_chords)
                                 span_event["event_notes"].update(window_pcs)
                                 span_event["event_pitches"].update(window_pitches)
+                        
+                        # DEBUG - final state after all updates
+                        if bar <= 10:
+                            print(f"   |-- FINAL: chords={events[key]['chords']}, event_notes={events[key]['event_notes']}, event_pitches={events[key]['event_pitches']}")
 
         # === PHASE 3: Neighbor/Passing Note Detection ===
         # NEW ALGORITHM: Detect harmonic stability with melodic change
@@ -2630,6 +2676,17 @@ class MidiChordAnalyzer(tk.Tk):
                         continue  # Third is present, skip 'no3' chord
                     if chord_pattern.issubset(normalized):
                         matched = full_name.replace('C', self.semitone_to_note(root))
+                        # DEBUG for "no3" chord selection
+                        import inspect
+                        frame = inspect.currentframe()
+                        try:
+                            outer_locals = frame.f_back.f_locals
+                            if outer_locals.get('bar', 999) <= 10:
+                                print(f"      |-> 'no3' chord {matched} matched: pattern={chord_pattern}, third_major_pc={third_major}, third_minor_pc={third_minor}, third_present={third_present}, pattern_subset={chord_pattern.issubset(normalized)}")
+                        except:
+                            pass
+                        finally:
+                            del frame
                         chords_found.append(matched)
                         break
                 else:
