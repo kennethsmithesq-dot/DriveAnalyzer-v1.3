@@ -211,6 +211,8 @@ class MidiChordAnalyzer(tk.Tk):
         self.include_anacrusis = True
         self.include_non_drive_events = True
         self.arpeggio_searching = True
+        self.arpeggio_mode = "relaxed"  # "off", "tight", or "relaxed"
+        self.debug_arpeggio = False
         self.neighbour_notes_searching = True
         self.neighbour_notes_mode = "relaxed"  # "off", "relaxed", or "tight"
         self.arpeggio_block_similarity_threshold = 0.5
@@ -717,7 +719,16 @@ class MidiChordAnalyzer(tk.Tk):
         include_triads_var = tk.BooleanVar(value=self.include_triads)
         remove_repeats_var = tk.BooleanVar(value=self.remove_repeats)
         include_anacrusis_var = tk.BooleanVar(value=self.include_anacrusis)
-        arpeggio_searching_var = tk.BooleanVar(value=self.arpeggio_searching)
+        current_arpeggio_mode = getattr(self, 'arpeggio_mode', None)
+        if current_arpeggio_mode not in ('off', 'tight', 'relaxed'):
+            current_arpeggio_mode = 'relaxed' if getattr(self, 'arpeggio_searching', True) else 'off'
+        if current_arpeggio_mode == 'off':
+            current_arpeggio_mode_label = 'Off'
+        elif current_arpeggio_mode == 'tight':
+            current_arpeggio_mode_label = 'Tight'
+        else:
+            current_arpeggio_mode_label = 'Relaxed'
+        arpeggio_mode_var = tk.StringVar(value=current_arpeggio_mode_label)
         
         # Combine neighbor note enabled/mode into single dropdown
         current_neighbor_mode = getattr(self, 'neighbour_notes_mode', 'relaxed')
@@ -737,15 +748,15 @@ class MidiChordAnalyzer(tk.Tk):
             if mode == "time_segment":
                 # Disable incompatible options for time-segment mode
                 anacrusis_cb.config(state="disabled")
-                arpeggio_cb.config(state="disabled")
+                arpeggio_dropdown.config(state="disabled")
                 neighbour_dropdown.config(state="disabled")
                 include_anacrusis_var.set(False)
-                arpeggio_searching_var.set(False)
+                arpeggio_mode_var.set('Off')
                 neighbour_mode_var.set('Off')
             else:
                 # Re-enable all options for event-based mode
                 anacrusis_cb.config(state="normal")
-                arpeggio_cb.config(state="normal")
+                arpeggio_dropdown.config(state="readonly")
                 neighbour_dropdown.config(state="normal")
         
         analysis_mode_frame = create_setting_section(scrollable_frame, "Analysis Mode", 
@@ -785,8 +796,10 @@ class MidiChordAnalyzer(tk.Tk):
         # Arpeggio Searching
         arpeggio_frame = create_setting_section(scrollable_frame, "Arpeggio Searching", 
             "Detect arpeggiated chords (broken chords played in sequence) and group them together", None)
-        arpeggio_cb = ttk.Checkbutton(arpeggio_frame, text="Enabled", variable=arpeggio_searching_var, style="Settings.TCheckbutton")
-        arpeggio_cb.pack(anchor="w")
+        arpeggio_dropdown = ttk.Combobox(arpeggio_frame, textvariable=arpeggio_mode_var,
+                                         values=["Off", "Tight", "Relaxed"],
+                                         state="readonly", width=20, style="Settings.TCombobox")
+        arpeggio_dropdown.pack(anchor="w")
         
         # Consonant Skips
         neighbour_frame = create_setting_section(scrollable_frame, "Consonant Skips", 
@@ -918,12 +931,22 @@ class MidiChordAnalyzer(tk.Tk):
             # For time-segment mode, force certain settings to False
             if self.analysis_mode == "time_segment":
                 self.include_anacrusis = False
+                self.arpeggio_mode = "off"
                 self.arpeggio_searching = False
                 self.neighbour_notes_searching = False
                 self.neighbour_notes_mode = "off"
             else:
                 self.include_anacrusis = include_anacrusis_var.get()
-                self.arpeggio_searching = arpeggio_searching_var.get()
+                arpeggio_mode_value = arpeggio_mode_var.get()
+                if arpeggio_mode_value == "Off":
+                    self.arpeggio_mode = "off"
+                    self.arpeggio_searching = False
+                elif arpeggio_mode_value == "Tight":
+                    self.arpeggio_mode = "tight"
+                    self.arpeggio_searching = True
+                else:
+                    self.arpeggio_mode = "relaxed"
+                    self.arpeggio_searching = True
                 # Handle neighbor notes dropdown
                 mode_value = neighbour_mode_var.get()
                 if mode_value == "Off":
@@ -1027,10 +1050,9 @@ class MidiChordAnalyzer(tk.Tk):
             include_triads_var.set(True)
             remove_repeats_var.set(True)
             include_anacrusis_var.set(True)
-            arpeggio_searching_var.set(True)
-            neighbour_notes_var.set(True)
+            arpeggio_mode_var.set("Relaxed")
+            neighbour_mode_var.set("Relaxed (default)")
             include_non_drive_var.set(True)
-            pedal_enabled_var.set(False)
             pedal_mode_var.set("Off")
             duration_filter_enabled_var.set(False)
             duration_threshold_var.set("8th notes")
@@ -1623,10 +1645,11 @@ class MidiChordAnalyzer(tk.Tk):
                         # If no notes start but notes end, skip creating an event (it's just note endings)
                         if notes_starting:
                             rule1_applied = True
-                            test_notes = notes_starting.copy()  # Only notes starting now
+                            # Include lingering notes that continue across the change
+                            test_notes = (notes_starting | notes_continuing).copy()
                             test_pitches = set()
                             for st, en, prs in note_events:
-                                if st == time:  # Only notes that start exactly at this time
+                                if st == time or (st < time < en):
                                     test_pitches.update(prs)
                             
                             key = (bar, beat_subdivision, ts)  # Use normal key structure
@@ -1684,6 +1707,8 @@ class MidiChordAnalyzer(tk.Tk):
                     events[key].setdefault("offset", time)
                     if rule1_applied:
                         events[key]["rule1_event"] = True
+                        # Track pitch classes that both start and end at this time (paired moves only)
+                        events[key]["rule1_change_pcs"] = (filtered_notes_starting & filtered_notes_ending)
                     else:
                         events[key].setdefault("rule1_event", False)
                     
@@ -1700,6 +1725,10 @@ class MidiChordAnalyzer(tk.Tk):
 
         # === PHASE 2: Arpeggio Pattern Detection ===
         if self.arpeggio_searching:
+            def arp_debug(msg: str):
+                if getattr(self, 'debug_arpeggio', False):
+                    print(msg)
+
             # Build a list of all single notes (not chords) sorted by onset
             melodic_notes = [elem for elem in flat_notes if isinstance(elem, note.Note)]
             melodic_notes = sorted(melodic_notes, key=lambda n: n.offset)
@@ -1712,14 +1741,39 @@ class MidiChordAnalyzer(tk.Tk):
                     # Only consider windows with strictly increasing onsets
                     if any(window_offsets[j] >= window_offsets[j+1] for j in range(w-1)):
                         continue
+
+                    # Temporal compactness filter (applies to both relaxed and tight arpeggio modes)
+                    # No consecutive onset gap may be greater than Nx any other gap
+                    # (equivalently: largest gap <= N * smallest gap).
+                    onset_gaps = [float(window_offsets[j+1] - window_offsets[j]) for j in range(w - 1)]
+                    if not onset_gaps:
+                        continue
+                    min_gap = min(onset_gaps)
+                    max_gap = max(onset_gaps)
+                    if min_gap <= 0:
+                        continue
+                    arpeggio_mode = getattr(self, 'arpeggio_mode', 'relaxed')
+                    gap_ratio_limit = 3.0 if arpeggio_mode == 'relaxed' else 2.0
+                    if max_gap > (gap_ratio_limit * min_gap):
+                        arp_debug(f"[ARP] reject temporal window={[(float(o)) for o in window_offsets]} ratio={max_gap/min_gap:.2f} limit={gap_ratio_limit}")
+                        continue
+
                     window_pitches = [n.pitch.midi for n in window]
                     window_pcs = {p % 12 for p in window_pitches}
                     if len(window_pcs) < 3:
                         continue
                     chords = self.detect_chords(window_pcs, debug=False)
-                    # Reject ambiguous arpeggios that match multiple chords
-                    if len(chords) > 1:
-                        continue
+
+                    arpeggio_mode = getattr(self, 'arpeggio_mode', 'relaxed')
+                    if arpeggio_mode not in ('off', 'tight', 'relaxed'):
+                        arpeggio_mode = 'relaxed' if getattr(self, 'arpeggio_searching', True) else 'off'
+                    if arpeggio_mode == 'tight':
+                        chords = [ch for ch in chords if self._passes_tight_arpeggio(window_pitches, ch)]
+                        if not chords:
+                            arp_debug(f"[ARP] reject tight interruptions window={[(float(o)) for o in window_offsets]} pitches={window_pitches}")
+
+                    # Keep all detected arpeggios from this window.
+                    # Downstream processing will retain only the strongest quality per root.
                     if chords:
                         # Display arpeggio analysis for specified range
                         bar, beat, ts = offset_to_bar_beat(window[0].offset)
@@ -1751,7 +1805,65 @@ class MidiChordAnalyzer(tk.Tk):
                                     break
                         
                         if not harmonic_stability:
+                            arp_debug(f"[ARP] reject harmonic stability window={[(float(o)) for o in window_offsets]} chords={chords}")
                             continue  # Skip this arpeggio
+
+                        # Rule 1 interaction (relaxed mode only): allow arpeggio only if
+                        # its pitches are not among the changing pitches at the change timepoint.
+                        if arpeggio_mode == 'relaxed':
+                            offending_pcs = set()
+                            first_note_pc = window[0].pitch.midi % 12
+
+                            def _first_note_sustains(change_time: float) -> bool:
+                                has_before = False
+                                has_after = False
+                                for st_all, en_all, prs_all in note_events:
+                                    if first_note_pc not in {p % 12 for p in prs_all}:
+                                        continue
+                                    if st_all < change_time < en_all:
+                                        return True
+                                    if abs(en_all - change_time) < 1e-9:
+                                        has_before = True
+                                    if abs(st_all - change_time) < 1e-9:
+                                        has_after = True
+                                return has_before and has_after
+
+                            for note_elem in window:
+                                note_bar, note_beat, note_ts = offset_to_bar_beat(note_elem.offset)
+                                note_key = (note_bar, note_beat, note_ts)
+                                existing_event = events.get(note_key, {})
+                                change_pcs = set(existing_event.get("rule1_change_pcs", set()))
+                                if not change_pcs:
+                                    continue
+                                change_time = float(existing_event.get("offset", note_elem.offset))
+                                if _first_note_sustains(change_time):
+                                    continue
+                                note_pc = note_elem.pitch.midi % 12
+                                if note_pc in change_pcs:
+                                    offending_pcs.add(note_pc)
+                            if offending_pcs:
+                                arp_debug(f"[ARP] reject Rule1 change overlap window={[(float(o)) for o in window_offsets]} offending_pcs={sorted(offending_pcs)}")
+                                continue
+
+                        if arpeggio_mode == 'tight':
+                            # Reject arpeggio if 2+ alien pitches start simultaneously during its span
+                            allowed_pcs = self.get_chord_tones(chords[0], set(range(12)))
+                            arp_start = float(window[0].offset)
+                            arp_end = float(window[-1].offset)
+                            if arp_end < arp_start:
+                                arp_start, arp_end = arp_end, arp_start
+                            alien_strike = False
+                            for st_all, _, prs_all in note_events:
+                                if st_all < arp_start or st_all > arp_end:
+                                    continue
+                                onset_pcs = {p % 12 for p in prs_all}
+                                aliens = onset_pcs - allowed_pcs
+                                if len(aliens) >= 2:
+                                    alien_strike = True
+                                    break
+                            if alien_strike:
+                                arp_debug(f"[ARP] reject alien strike window={[(float(o)) for o in window_offsets]}")
+                                continue
                         
                         # Before accepting arpeggio detection, compare to any simultaneous block event
                         key = (bar, beat, ts)
@@ -1778,7 +1890,9 @@ class MidiChordAnalyzer(tk.Tk):
                                 print(f"   '-- Jaccard check: inter={inter}, union={union}, jaccard={jaccard:.2f}, threshold=0.5, accept={accept_arpeggio}")
                             
                             if not accept_arpeggio:
+                                arp_debug(f"[ARP] reject Jaccard window={[(float(o)) for o in window_offsets]} jaccard={jaccard:.2f}")
                                 continue
+                        arp_debug(f"[ARP] accept window={[(float(o)) for o in window_offsets]} chords={chords}")
                         # Accept arpeggio event
                         if key not in events:
                             events[key] = {
@@ -2337,8 +2451,15 @@ class MidiChordAnalyzer(tk.Tk):
             basses = data.get("basses", set())
             event_notes_set = set(data.get("event_notes", set()))
             event_pitches_set = set(data.get("event_pitches", set()))
+            if not basses:
+                if event_pitches_set:
+                    bass_note = self.semitone_to_note(min(event_pitches_set) % 12)
+                    basses = {bass_note}
+                elif event_notes_set:
+                    bass_note = self.semitone_to_note(min(event_notes_set) % 12)
+                    basses = {bass_note}
             chords_by_root: Dict[str, Any] = {}
-            for chord in chords:
+            for chord in sorted(chords):
                 root = next((n for n in sorted(NOTE_TO_SEMITONE.keys(), key=lambda x: -len(x)) if chord.startswith(n)), None)
                 if not root:
                     continue
@@ -2352,28 +2473,8 @@ class MidiChordAnalyzer(tk.Tk):
                     prev_base = prev_chord.replace(root, 'C')
                     prev_quality = prev_base[1:] if prev_base.startswith('C') else prev_base
                     prev_priority = priority_list.index(prev_quality) if prev_quality in priority_list else 999
-                    
-                    # INTELLIGENT CHORD MERGING: Instead of just picking by priority,
-                    # combine pitch materials and find the strongest harmonic interpretation
                     if current_priority < prev_priority:
-                        # New chord would win - but let's try merging first
-                        combined_pcs = event_notes_set.copy()  # This contains all pitch classes for this event
-                        merged_chords = self.detect_chords(combined_pcs, debug=False)
-                        
-                        if merged_chords:
-                            # Filter to chords with the same root
-                            root_chords = [c for c in merged_chords if c.startswith(root)]
-                            if root_chords:
-                                # Take the best merged result
-                                best_merged = min(root_chords, key=chord_priority)
-                                chords_by_root[root] = best_merged
-                            else:
-                                # Fallback to priority-based selection
-                                chords_by_root[root] = chord
-                        else:
-                            # Fallback to priority-based selection  
-                            chords_by_root[root] = chord
-                    # If prev_priority is better, we keep prev_chord (no change needed)
+                        chords_by_root[root] = chord
                 else:
                     chords_by_root[root] = chord
             processed_events.append(((bar, beat, ts), chords_by_root, basses, event_notes_set, event_pitches_set))
@@ -2600,6 +2701,35 @@ class MidiChordAnalyzer(tk.Tk):
         
         # Return intersection with the provided note set
         return chord_tone_pcs & note_set
+
+    def _passes_tight_arpeggio(self, melodic_pitches: List[int], chord_name: str) -> bool:
+        """
+        Tight arpeggio rule:
+        chord tones must appear as an uninterrupted run in the melodic sequence.
+        Any non-chord tone between first and last chord tone invalidates the candidate.
+        """
+        if not melodic_pitches or not chord_name:
+            return False
+
+        melodic_pcs = [pitch % 12 for pitch in melodic_pitches]
+        chord_tones = self.get_chord_tones(chord_name, set(range(12)))
+        if len(chord_tones) < 3:
+            return False
+
+        tone_indices = [idx for idx, pc in enumerate(melodic_pcs) if pc in chord_tones]
+        if len(tone_indices) < len(chord_tones):
+            return False
+
+        first_idx = tone_indices[0]
+        last_idx = tone_indices[-1]
+        contiguous_span = melodic_pcs[first_idx:last_idx + 1]
+
+        # If the span contains any non-chord tone, tight-mode fails
+        if any(pc not in chord_tones for pc in contiguous_span):
+            return False
+
+        # Ensure all chord tones are represented in the uninterrupted run
+        return chord_tones.issubset(set(contiguous_span))
 
     def detect_chords(self, semitones, debug: bool = False):
         """
@@ -2828,7 +2958,7 @@ class MidiChordAnalyzer(tk.Tk):
             event_notes_set = set(data.get("event_notes", set()))
             event_pitches_set = set(data.get("event_pitches", set()))
             chords_by_root: Dict[str, Any] = {}
-            for chord in chords:
+            for chord in sorted(chords):
                 root = next((n for n in sorted(NOTE_TO_SEMITONE.keys(), key=lambda x: -len(x)) if chord.startswith(n)), None)
                 if not root:
                     continue
@@ -4800,7 +4930,7 @@ class DriveStrengthParametersDialog:
             ("rule1_bass_support", "Factor 1: Bass Support", "Adds points when the bass note supports the drive's root. Bass foundation strengthens harmonic clarity.", "(0-100)"),
             ("rule2_tonic_dominant", "Factor 2: Tonic-Dominant Relationship", "Bonus points awarded to the dominant drive of the selected tonic key. Strengthens tonal center relationships. Only select tonic if this is clear.", "(0-100)"),
             ("rule3_root_repetition", "Factor 3: Drive Repetition (per occurrence)", "Cumulative bonus for each repeated drive of any type associated with a given root note. Reinforcement through repetition increases drive strength.", "(0-100)"),
-            ("rule4_resolution_max", "Factor 4: Proportional Resolution (maximum)", "Bonus given to proportional representation of the drive in the piece.", "(0-100)"),
+            ("rule4_resolution_max", "Factor 4: Drive Resolution History", "A cumulative score added to each resolution down a fifth / up a fourth", "(0-100)"),
             ("rule5_clean_voicing", "Factor 5: Clean Voicing", "Bonus for clean drive presentation. Clear voicing enhances harmonic impact.", "(0-100)"),
             ("rule6_same_chord", "Factor 6a: Same Chord Continuation", "Bonus when the same drive continues from the previous event.", "(0-100)"),
             ("rule6_dominant_prep", "Factor 6b: Dominant Preparation", "Bonus when the previous drive was a dominant.", "(0-100)"),
@@ -4966,7 +5096,7 @@ class DriveStrengthParametersDialog:
         rule_names = {
             "rule1_bass_support": "Factor 1 (Bass Support)",
             "rule3_root_repetition": "Factor 3 (Root Repetition)",
-            "rule4_resolution_max": "Factor 4 (Resolution Max)",
+            "rule4_resolution_max": "Factor 4 (Drive Resolution History)",
             "rule5_clean_voicing": "Factor 5 (Clean Voicing)",
             "rule6_same_chord": "Factor 6a (Same Chord)",
             "rule6_dominant_prep": "Factor 6b (Dominant Prep)",
