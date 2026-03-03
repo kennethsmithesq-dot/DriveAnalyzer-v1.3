@@ -1208,7 +1208,10 @@ class MidiChordAnalyzer(tk.Tk):
         4. Neighbor/passing note detection
         5. Event merging and post-processing
         """
-        flat_notes = list(score.flatten().getElementsByClass([note.Note, m21chord.Chord]))
+        flat_notes = [
+            elem for elem in score.flatten().getElementsByClass([note.Note, m21chord.Chord])
+            if "ChordSymbol" not in getattr(elem, "classes", []) and elem.quarterLength > 0
+        ]
 
         # Extract time signatures for bar/beat calculation
         time_signatures = []
@@ -1468,10 +1471,21 @@ class MidiChordAnalyzer(tk.Tk):
             
             if self.include_anacrusis:
                 for s_start, s_end, s_pitch in single_notes:
-                    # Only include anacrusis notes that were struck as single pitches in isolation
-                    # and end exactly when the current chord analysis point occurs
-                    # (single_notes already ensures the note was struck alone, not as part of a chord)
+                    # Only include anacrusis notes that end exactly when the current
+                    # chord analysis point occurs.
                     if s_end == time:
+                        # Enforce isolated articulation at anacrusis onset:
+                        # no other pitches may be newly struck at the same moment.
+                        onset_pitches = [
+                            pitch
+                            for note_start, _, pitches in note_events
+                            if note_start == s_start
+                            for pitch in pitches
+                        ]
+
+                        if len(onset_pitches) != 1 or onset_pitches[0] != s_pitch:
+                            continue
+
                         # Check for intervening articulation: any notes starting AFTER anacrusis begins but BEFORE chord analysis time
                         has_intervening_notes = any(
                             s_start < note_start < time 
@@ -1686,9 +1700,22 @@ class MidiChordAnalyzer(tk.Tk):
                             prior_key = prev_key
                             break
                     if prior_key is not None:
+                        # Keep inheritance local: do not jump across distant beats.
+                        if abs(float(beat) - float(prior_key[1])) > 1.0:
+                            prior_key = None
+                    if prior_key is not None:
+                        prior_event = events.get(prior_key, {})
+                        if prior_event.get("rule1_event"):
+                            prior_key = None
+                    if prior_key is not None:
                         prior_event = events.get(prior_key, {})
                         prior_notes = set(prior_event.get("event_notes", set()))
-                        if prior_notes and set(test_notes).issubset(prior_notes):
+                        current_notes = set(test_notes)
+                        # Require reasonably strong overlap to avoid broad harmonic carryover.
+                        union = prior_notes | current_notes
+                        inter = prior_notes & current_notes
+                        jaccard = (len(inter) / len(union)) if union else 0.0
+                        if prior_notes and current_notes.issubset(prior_notes) and jaccard >= 0.6:
                             test_notes.update(prior_notes)
                             test_pitches.update(prior_event.get("event_pitches", set()))
                 
@@ -1729,6 +1756,91 @@ class MidiChordAnalyzer(tk.Tk):
                 if getattr(self, 'debug_arpeggio', False):
                     print(msg)
 
+            contamination_rejections = []
+
+            def contaminated_member_count(window_notes, chord_name: str) -> int:
+                """
+                Count arpeggio members contaminated by simultaneous non-chord tones.
+                Contamination is evaluated only at exact same-start onsets.
+                Stable alien tones that persist unchanged across all member onsets
+                are ignored (treated as static background, not contamination).
+                """
+                if not window_notes or not chord_name:
+                    return 0
+
+                allowed_pcs = self.get_chord_tones(chord_name, set(range(12)))
+                if not allowed_pcs:
+                    return 0
+
+                aliens_by_member = []
+                for note_elem in window_notes:
+                    onset = float(note_elem.offset)
+                    onset_pcs = set()
+                    for st_all, _, prs_all in note_events:
+                        if abs(float(st_all) - onset) < 1e-9:
+                            onset_pcs.update({p % 12 for p in prs_all})
+
+                    aliens = onset_pcs - allowed_pcs
+                    aliens_by_member.append(aliens)
+
+                non_empty_aliens = [s for s in aliens_by_member if s]
+                persistent_aliens = set.intersection(*non_empty_aliens) if non_empty_aliens else set()
+
+                contaminated = 0
+                for aliens in aliens_by_member:
+                    effective_aliens = aliens - persistent_aliens
+                    if effective_aliens:
+                        contaminated += 1
+                return contaminated
+
+            def window_positions_bar_beat(window_notes):
+                positions = []
+                for note_elem in window_notes:
+                    bar_num, beat_num, ts_text = offset_to_bar_beat(note_elem.offset)
+                    positions.append(f"{bar_num}.{beat_num}({ts_text})")
+
+                # Dedupe consecutive repeats for clearer debug output
+                compact_positions = []
+                for pos in positions:
+                    if not compact_positions or compact_positions[-1] != pos:
+                        compact_positions.append(pos)
+                return compact_positions
+
+            def first_note_maybe_anacrusis(window_notes) -> bool:
+                """
+                Heuristic overlap tag: does the first arpeggio note satisfy
+                the core Phase 1 anacrusis-candidate conditions?
+                """
+                if not window_notes or len(window_notes) < 2:
+                    return False
+
+                first_note = window_notes[0]
+                first_start = float(first_note.offset)
+                resolution_time = float(window_notes[1].offset)
+                first_pitch = int(first_note.pitch.midi)
+
+                if not (first_start < resolution_time):
+                    return False
+
+                matched_single = None
+                for s_start, s_end, s_pitch in single_notes:
+                    if abs(float(s_start) - first_start) < 1e-9 and int(s_pitch) == first_pitch:
+                        matched_single = (float(s_start), float(s_end), int(s_pitch))
+                        break
+
+                if matched_single is None:
+                    return False
+
+                s_start, s_end, _ = matched_single
+                if not (s_end > resolution_time):
+                    return False
+
+                has_intervening_notes = any(
+                    s_start < float(note_start) < resolution_time
+                    for note_start, _, _ in note_events
+                )
+                return not has_intervening_notes
+
             # Build a list of all single notes (not chords) sorted by onset
             melodic_notes = [elem for elem in flat_notes if isinstance(elem, note.Note)]
             melodic_notes = sorted(melodic_notes, key=lambda n: n.offset)
@@ -1738,6 +1850,7 @@ class MidiChordAnalyzer(tk.Tk):
                 for i in range(len(melodic_notes) - w + 1):
                     window = melodic_notes[i:i+w]
                     window_offsets = [n.offset for n in window]
+                    maybe_anacrusis = first_note_maybe_anacrusis(window)
                     # Only consider windows with strictly increasing onsets
                     if any(window_offsets[j] >= window_offsets[j+1] for j in range(w-1)):
                         continue
@@ -1772,11 +1885,34 @@ class MidiChordAnalyzer(tk.Tk):
                         if not chords:
                             arp_debug(f"[ARP] reject tight interruptions window={[(float(o)) for o in window_offsets]} pitches={window_pitches}")
 
+                    # BOTH MODES: reject arpeggio candidates if 2+ arpeggio members are
+                    # contaminated by simultaneous non-chord tones at the same onset.
+                    filtered_chords = []
+                    for chord_name in chords:
+                        contaminated = contaminated_member_count(window, chord_name)
+                        if contaminated >= 2:
+                            contamination_rejections.append({
+                                "window_positions": window_positions_bar_beat(window),
+                                "chord": chord_name,
+                                "contaminated_members": contaminated,
+                                "window_size": w,
+                                "maybe_anacrusis": maybe_anacrusis,
+                            })
+                            arp_debug(
+                                f"[ARP] reject contamination window={window_positions_bar_beat(window)} "
+                                f"chord={chord_name} contaminated_members={contaminated} "
+                                f"maybe_anacrusis={maybe_anacrusis}"
+                            )
+                            continue
+                        filtered_chords.append(chord_name)
+                    chords = filtered_chords
+
                     # Keep all detected arpeggios from this window.
                     # Downstream processing will retain only the strongest quality per root.
                     if chords:
                         # Display arpeggio analysis for specified range
-                        bar, beat, ts = offset_to_bar_beat(window[0].offset)
+                        arpeggio_anchor_offset = float(window[0].offset)
+                        bar, beat, ts = offset_to_bar_beat(arpeggio_anchor_offset)
                         
                         # HARMONIC STABILITY CHECK: Only accept arpeggio if underlying harmony is stable
                         # Check all time points in the arpeggio window for existing block chords
@@ -1892,7 +2028,10 @@ class MidiChordAnalyzer(tk.Tk):
                             if not accept_arpeggio:
                                 arp_debug(f"[ARP] reject Jaccard window={[(float(o)) for o in window_offsets]} jaccard={jaccard:.2f}")
                                 continue
-                        arp_debug(f"[ARP] accept window={[(float(o)) for o in window_offsets]} chords={chords}")
+                        arp_debug(
+                            f"[ARP] accept window={window_positions_bar_beat(window)} "
+                            f"chords={chords} maybe_anacrusis={maybe_anacrusis}"
+                        )
                         # Accept arpeggio event
                         if key not in events:
                             events[key] = {
@@ -1901,8 +2040,9 @@ class MidiChordAnalyzer(tk.Tk):
                                 "event_notes": set(),
                                 "event_pitches": set(),
                             }
-                        events[key].setdefault("offset", window[0].offset)
+                        events[key].setdefault("offset", arpeggio_anchor_offset)
                         events[key]["arpeggio_detected"] = True
+                        events[key]["arpeggio_maybe_anacrusis"] = maybe_anacrusis
                         events[key]["chords"].update(chords)
                         # Arpeggios contribute to chord identification but not bass detection
                         # Bass detection relies on actual bass line or block chord voicings
@@ -1911,7 +2051,7 @@ class MidiChordAnalyzer(tk.Tk):
                         
                         # When arpeggio is detected, restore full harmonic context to prevent Rule 1 interference
                         # Find all notes overlapping this time point and add them back
-                        arp_start_time = float(window[0].offset)
+                        arp_start_time = arpeggio_anchor_offset
                         for st_all, en_all, prs_all in note_events:
                             # Include notes that overlap with the arpeggio time point
                             if st_all <= arp_start_time < en_all:
@@ -1924,7 +2064,7 @@ class MidiChordAnalyzer(tk.Tk):
                         events[key]["event_pitches"].update(window_pitches)
 
                         # Propagate arpeggio chords across the span to keep continuity
-                        arp_start = float(window[0].offset)
+                        arp_start = arpeggio_anchor_offset
                         arp_end = float(window[-1].offset)
                         if arp_end < arp_start:
                             arp_start, arp_end = arp_end, arp_start
@@ -1943,12 +2083,59 @@ class MidiChordAnalyzer(tk.Tk):
                             print(f"   '-- FINAL STATE: key={key}, chords={events[key]['chords']}, event_notes={events[key]['event_notes']}")
                             print()
 
+            if getattr(self, 'debug_arpeggio', False):
+                print(f"[ARP] contamination summary: total_rejections={len(contamination_rejections)}")
+                for idx, entry in enumerate(contamination_rejections[:20], start=1):
+                    print(
+                        f"[ARP] contamination#{idx}: window={entry['window_positions']} "
+                        f"w={entry['window_size']} chord={entry['chord']} "
+                        f"contaminated_members={entry['contaminated_members']} "
+                        f"maybe_anacrusis={entry.get('maybe_anacrusis', False)}"
+                    )
+                if len(contamination_rejections) > 20:
+                    print(f"[ARP] contamination summary: ... {len(contamination_rejections) - 20} more")
+
         # === PHASE 3: Neighbor/Passing Note Detection ===
         # NEW ALGORITHM: Detect harmonic stability with melodic change
         # Look for cases where exactly one note changes while 2+ others are retained,
         # and BIND related events together at the foundational timing
             
         if getattr(self, 'neighbour_notes_searching', False):
+
+            def _chord_roots(chord_set):
+                roots = set()
+                for chord_name in (chord_set or set()):
+                    root = next((n for n in sorted(NOTE_TO_SEMITONE.keys(), key=lambda x: -len(x)) if chord_name.startswith(n)), None)
+                    if root:
+                        roots.add(root)
+                return roots
+
+            def _major_harmonic_change_between(key_a, key_b):
+                event_a = events.get(key_a, {})
+                event_b = events.get(key_b, {})
+
+                if event_a.get("rule1_event") and event_b.get("rule1_event"):
+                    return True
+
+                roots_a = _chord_roots(event_a.get("chords", set()))
+                roots_b = _chord_roots(event_b.get("chords", set()))
+                if roots_a and roots_b:
+                    shared_roots = roots_a & roots_b
+                    if not shared_roots:
+                        return True
+                    if len(shared_roots) == 1 and len(roots_a) >= 2 and len(roots_b) >= 2:
+                        return True
+
+                notes_a = set(event_a.get("event_notes", set()))
+                notes_b = set(event_b.get("event_notes", set()))
+                if len(notes_a) >= 3 and len(notes_b) >= 3:
+                    union = notes_a | notes_b
+                    inter = notes_a & notes_b
+                    jaccard = (len(inter) / len(union)) if union else 0.0
+                    if jaccard < 0.4:
+                        return True
+
+                return False
             
             # Group all note events by bar for boundary respect
             notes_by_bar = {}
@@ -2138,20 +2325,29 @@ class MidiChordAnalyzer(tk.Tk):
                                 completion_time = next_time
                                 completion_bar, completion_beat, completion_ts = offset_to_bar_beat(completion_time)
                                 completion_key = (completion_bar, completion_beat, completion_ts)
+
+                                # Hard stop: do not apply consonant-skip enrichment/binding
+                                # across major harmonic changes.
+                                if completion_key != foundation_key and _major_harmonic_change_between(foundation_key, completion_key):
+                                    if getattr(self, 'debug_arpeggio', False):
+                                        print(f"[CS-BIND] skip major change foundation={foundation_key} completion={completion_key}")
+                                    continue
                                 
 
-                                
-                                # Plan to bind completion event into foundation event
-                                if foundation_key not in events_to_bind:
-                                    events_to_bind[foundation_key] = []
-                                if completion_key != foundation_key:
-                                    events_to_bind[foundation_key].append(completion_key)
                                 
                                 # Enhance the foundation event with the discovered chords
                                 if foundation_key not in events:
                                     events[foundation_key] = {"chords": set(), "basses": set(), "event_notes": set()}
                                 events[foundation_key]["chords"].update(final_chords)
                                 events[foundation_key]["event_notes"].update(final_test_pcs)
+
+                                # Plan to bind completion event into foundation event
+                                if completion_key != foundation_key:
+                                    if foundation_key not in events_to_bind:
+                                        events_to_bind[foundation_key] = []
+                                    events_to_bind[foundation_key].append(completion_key)
+                                    if getattr(self, 'debug_arpeggio', False):
+                                        print(f"[CS-BIND] bind foundation={foundation_key} <- completion={completion_key}")
                             
                             
             # Execute the binding: merge later events into foundation events
@@ -2163,6 +2359,10 @@ class MidiChordAnalyzer(tk.Tk):
                         completion_bar, completion_beat, completion_ts = completion_key
                         if completion_key in events:
                             if events[completion_key].get("rule1_event"):
+                                continue
+                            if _major_harmonic_change_between(foundation_key, completion_key):
+                                if getattr(self, 'debug_arpeggio', False):
+                                    print(f"[CS-BIND] skip execute major change foundation={foundation_key} completion={completion_key}")
                                 continue
                             completion_event = events[completion_key]
                             # For Rule 1 foundations, preserve the harmonic set but merge bass/notes
@@ -2199,7 +2399,18 @@ class MidiChordAnalyzer(tk.Tk):
                 curr_notes = set(curr_event.get("event_notes", set()))
                 notes_subset = bool(prev_notes) and bool(curr_notes) and curr_notes.issubset(prev_notes)
                 bass_match = bool(curr_basses) and bool(curr_basses & set(prev_event.get("basses", set())))
-                if prev_event.get("arpeggio_detected") or (notes_subset and bass_match):
+
+                # Arpeggio carry should only happen if the harmonic material actually
+                # continues across the boundary (not just because the previous event
+                # was tagged as arpeggio).
+                arpeggio_continuation = False
+                if prev_event.get("arpeggio_detected") and prev_notes and curr_notes and bass_match:
+                    shared_notes = prev_notes & curr_notes
+                    introduced_notes = curr_notes - prev_notes
+                    dropped_notes = prev_notes - curr_notes
+                    arpeggio_continuation = bool(shared_notes) and len(introduced_notes) <= 1 and len(dropped_notes) <= 1
+
+                if arpeggio_continuation or (notes_subset and bass_match):
                     curr_event["chords"].update(prev_event.get("chords", set()))
                     break
 
@@ -2210,7 +2421,10 @@ class MidiChordAnalyzer(tk.Tk):
         Time-segment based analysis: divide music into regular time segments
         and analyze all pitches active during each segment.
         """
-        flat_notes = list(score.flatten().getElementsByClass([note.Note, m21chord.Chord]))
+        flat_notes = [
+            elem for elem in score.flatten().getElementsByClass([note.Note, m21chord.Chord])
+            if "ChordSymbol" not in getattr(elem, "classes", []) and elem.quarterLength > 0
+        ]
 
         # Extract time signatures for bar/beat calculation
         time_signatures = []
@@ -2317,7 +2531,10 @@ class MidiChordAnalyzer(tk.Tk):
         segments = []
         
         # Find the total duration of the piece
-        flat_notes = list(score.flatten().getElementsByClass([note.Note, m21chord.Chord]))
+        flat_notes = [
+            elem for elem in score.flatten().getElementsByClass([note.Note, m21chord.Chord])
+            if "ChordSymbol" not in getattr(elem, "classes", []) and elem.quarterLength > 0
+        ]
         if not flat_notes:
             return segments
             
@@ -2509,7 +2726,7 @@ class MidiChordAnalyzer(tk.Tk):
         # Now collapse strictly identical consecutive chord-sets by unioning basses
         # Skip this collapsing for time-segment analysis to maintain segment independence
         if getattr(self, 'analysis_mode', 'event') == 'event':
-            final_filtered_events: List[Tuple[Tuple[int,int,str], Dict[str, Any], Any]] = []
+            final_filtered_events: List[Tuple[Tuple[int,int,str], Dict[str, Any], Any, Set[int], Set[int]]] = []
             prev_chords_set = None
             prev_bass_set = set()
             prev_event = None
@@ -2538,7 +2755,7 @@ class MidiChordAnalyzer(tk.Tk):
                     prev_pitches_set = pitches_set
         else:
             # For time-segment mode: keep all events as-is without any collapsing
-            final_filtered_events: List[Tuple[Tuple[int,int,str], Dict[str, Any], Any]] = []
+            final_filtered_events: List[Tuple[Tuple[int,int,str], Dict[str, Any], Any, Set[int], Set[int]]] = []
             for event in processed_events:
                 final_filtered_events.append(event)
 
@@ -2567,6 +2784,12 @@ class MidiChordAnalyzer(tk.Tk):
                 bass_union = prev_basses | cur_basses
                 bass_inter = prev_basses & cur_basses
                 bass_overlap = (len(bass_inter) / len(bass_union)) if bass_union else 0.0
+
+                prev_notes = set(prev[3]) if len(prev) > 3 else set()
+                cur_notes = set(ev[3]) if len(ev) > 3 else set()
+                notes_union = prev_notes | cur_notes
+                notes_inter = prev_notes & cur_notes
+                notes_overlap = (len(notes_inter) / len(notes_union)) if notes_union else 0.0
 
                 # Only consider merging if the events are close in time (same bar or adjacent)
                 prev_bar = prev[0][0]
@@ -2600,9 +2823,7 @@ class MidiChordAnalyzer(tk.Tk):
                             merged_chords[root] = min(candidates, key=chord_priority)
                     merged_basses = set(prev[2]) | set(ev[2])
                     # union event notes and pitches to avoid losing pitch data during merge
-                    prev_notes = set(prev[3]) if len(prev) > 3 else set()
                     prev_pitches = set(prev[4]) if len(prev) > 4 else set()
-                    cur_notes = set(ev[3]) if len(ev) > 3 else set()
                     cur_pitches = set(ev[4]) if len(ev) > 4 else set()
                     merged_notes = prev_notes | cur_notes
                     merged_pitches = prev_pitches | cur_pitches
