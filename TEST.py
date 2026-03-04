@@ -1362,6 +1362,15 @@ class MidiChordAnalyzer(tk.Tk):
 
 
         events = {}
+
+        def _add_chords_with_source(event_obj, chord_set, source_tag):
+            if not chord_set:
+                return
+            event_obj.setdefault("chords", set()).update(chord_set)
+            chord_sources = event_obj.setdefault("chord_sources", {})
+            for chord_name in chord_set:
+                chord_sources.setdefault(chord_name, set()).add(source_tag)
+
         active_notes = set()
         active_pitches = set()
         
@@ -1739,7 +1748,7 @@ class MidiChordAnalyzer(tk.Tk):
                     else:
                         events[key].setdefault("rule1_event", False)
                     
-                    events[key]["chords"].update(chords)
+                    _add_chords_with_source(events[key], chords, "P1_BLOCK")
                     events[key]["basses"].add(bass_note)
                     events[key]["event_notes"].update(test_notes)  # UNION instead of overwrite
                     if "event_pitches" not in events[key]:
@@ -2043,7 +2052,7 @@ class MidiChordAnalyzer(tk.Tk):
                         events[key].setdefault("offset", arpeggio_anchor_offset)
                         events[key]["arpeggio_detected"] = True
                         events[key]["arpeggio_maybe_anacrusis"] = maybe_anacrusis
-                        events[key]["chords"].update(chords)
+                        _add_chords_with_source(events[key], chords, "P2_ARP")
                         # Arpeggios contribute to chord identification but not bass detection
                         # Bass detection relies on actual bass line or block chord voicings
                         events[key]["event_notes"].update(window_pcs)
@@ -2059,7 +2068,7 @@ class MidiChordAnalyzer(tk.Tk):
                                 events[key]["event_notes"].update(new_pcs)
                                 events[key]["event_pitches"].update(prs_all)
                         
-                        events[key]["chords"].update(chords)
+                        _add_chords_with_source(events[key], chords, "P2_ARP")
                         events[key]["event_notes"].update(window_pcs)
                         events[key]["event_pitches"].update(window_pitches)
 
@@ -2074,7 +2083,7 @@ class MidiChordAnalyzer(tk.Tk):
                                 continue
                             if arp_start <= float(span_offset) <= arp_end:
                                 span_event.setdefault("event_pitches", set())
-                                span_event["chords"].update(chords)
+                                _add_chords_with_source(span_event, chords, "P2_ARP_PROP")
                                 span_event["event_notes"].update(window_pcs)
                                 span_event["event_pitches"].update(window_pitches)
                         
@@ -2191,38 +2200,10 @@ class MidiChordAnalyzer(tk.Tk):
                             old_note = list(removed)[0]
                             new_note = list(added)[0]
                             
-                            # First, perform initial chord detection for both basic and enhanced analysis
-                            # Evaluate chord formation with note substitution
+                            # Strict consonant-skip set: evaluate only swapped + retained notes
                             test_pcs = {old_note, new_note} | retained
-                            
-                            # Look for passing notes within the duration of retained notes that might complete better chords
-                            # Find the time span during which the retained notes are sounding
-                            retained_start = current_time
-                            retained_end = next_time
-                            for st, en, prs in bar_notes:
-                                if st <= current_time < en:
-                                    pitch_classes = {p % 12 for p in prs}
-                                    if pitch_classes & retained:  # If this contributes to retained notes
-                                        retained_end = max(retained_end, en)
-                            
-                            # Look for any notes that sound during the retained note period
-                            passing_pcs = set()
-                            for st, en, prs in bar_notes:
-                                # Include notes that start and end within the retained note duration
-                                if retained_start <= st < retained_end and retained_start < en <= retained_end:
-                                    passing_pcs.update({p % 12 for p in prs})
-                            
-                            # Include passing notes for enhanced chord analysis
-                            enhanced_test_pcs = test_pcs | passing_pcs
-                            
-                            # Always detect chords for both basic and enhanced note sets (regardless of count)
-                            basic_chords = self.detect_chords(test_pcs, debug=False)
-                            enhanced_chords = self.detect_chords(enhanced_test_pcs, debug=False)
-                            
-                            # Check which chord analysis to use (moved outside the >=4 condition)
-                            # Use enhanced version if it found chords, otherwise fall back to basic
-                            initial_final_chords = enhanced_chords if enhanced_chords else basic_chords
-                            initial_final_test_pcs = enhanced_test_pcs if enhanced_chords else test_pcs
+                            initial_final_chords = self.detect_chords(test_pcs, debug=False)
+                            initial_final_test_pcs = test_pcs
                             
                             # For tight mode: check if detected chord tones are temporally adjacent
                             if getattr(self, 'neighbour_notes_mode', 'relaxed') == 'tight':
@@ -2338,7 +2319,7 @@ class MidiChordAnalyzer(tk.Tk):
                                 # Enhance the foundation event with the discovered chords
                                 if foundation_key not in events:
                                     events[foundation_key] = {"chords": set(), "basses": set(), "event_notes": set()}
-                                events[foundation_key]["chords"].update(final_chords)
+                                _add_chords_with_source(events[foundation_key], final_chords, "P3_CS_ENRICH")
                                 events[foundation_key]["event_notes"].update(final_test_pcs)
 
                                 # Plan to bind completion event into foundation event
@@ -2372,7 +2353,7 @@ class MidiChordAnalyzer(tk.Tk):
                                 events[foundation_key]["event_pitches"] = events[foundation_key].get("event_pitches", set()) | completion_event.get("event_pitches", set())
                             else:
                                 # Merge the completion event into the foundation event
-                                events[foundation_key]["chords"].update(completion_event.get("chords", set()))
+                                _add_chords_with_source(events[foundation_key], completion_event.get("chords", set()), "P3_CS_BIND")
                                 events[foundation_key]["basses"].update(completion_event.get("basses", set()))
                                 events[foundation_key]["event_notes"].update(completion_event.get("event_notes", set()))
                                 events[foundation_key]["event_pitches"] = events[foundation_key].get("event_pitches", set()) | completion_event.get("event_pitches", set())
@@ -2411,7 +2392,7 @@ class MidiChordAnalyzer(tk.Tk):
                     arpeggio_continuation = bool(shared_notes) and len(introduced_notes) <= 1 and len(dropped_notes) <= 1
 
                 if arpeggio_continuation or (notes_subset and bass_match):
-                    curr_event["chords"].update(prev_event.get("chords", set()))
+                    _add_chords_with_source(curr_event, prev_event.get("chords", set()), "P4_ANA_CARRY")
                     break
 
         return self._process_detected_events(events)
