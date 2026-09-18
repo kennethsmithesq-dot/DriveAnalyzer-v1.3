@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download and install python.org universal2 Python 3.11
         run: |
@@ -82,13 +82,13 @@ jobs:
           fi
 
       - name: Upload artifact (.app bundle zip)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-x86_64-app
           path: driveanalyzer-x86_64-clean.zip
 
       - name: Upload build logs and diagnostics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-x86_64-logs
           path: |
@@ -101,7 +101,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure runner is Apple Silicon (arm64)
         run: |
@@ -182,13 +182,13 @@ jobs:
           fi
 
       - name: Upload artifact (.app bundle zip)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-arm64-app
           path: driveanalyzer-arm64-clean.zip
 
       - name: Upload build logs and diagnostics (arm64)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-arm64-logs
           path: |
@@ -201,10 +201,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -250,13 +250,13 @@ jobs:
           }
 
       - name: Upload artifact (exe)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-windows-exe
           path: dist/DriveAnalyzer.exe
 
       - name: Upload build logs and diagnostics (Windows)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: driveanalyzer-windows-logs
           path: |
@@ -270,10 +270,10 @@ jobs:
     needs: [build-x86_64, build-arm64, build-windows]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
@@ -292,7 +292,10 @@ jobs:
           
           # Copy sample MusicXML files and manual
           mkdir -p "mac_release/Sample MusicXML Files"
-          find assets -maxdepth 1 -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp {} "mac_release/Sample MusicXML Files/" \;
+          test -d assets/sample_xml
+          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} "mac_release/Sample MusicXML Files/" \;
+          test -n "$(find "mac_release/Sample MusicXML Files" -type f -print -quit)"
+          find "mac_release/Sample MusicXML Files" -type f -maxdepth 1 -print
           cp assets/manual.pdf mac_release/
 
           # List contents for verification
@@ -307,20 +310,29 @@ jobs:
           
           # Copy sample MusicXML files and manual
           mkdir -p "windows_release/Sample MusicXML Files"
-          find assets -maxdepth 1 -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp {} "windows_release/Sample MusicXML Files/" \;
+          test -d assets/sample_xml
+          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} "windows_release/Sample MusicXML Files/" \;
+          test -n "$(find "windows_release/Sample MusicXML Files" -type f -print -quit)"
+          find "windows_release/Sample MusicXML Files" -type f -maxdepth 1 -print
           cp assets/manual.pdf windows_release/
 
           # List contents for verification
           ls -la windows_release/
 
+      - name: Create release zip files
+        run: |
+          zip -r -q drive-analyzer-v1-3-mac.zip mac_release
+          zip -r -q drive-analyzer-v1-3-windows.zip windows_release
+          ls -lh drive-analyzer-v1-3-mac.zip drive-analyzer-v1-3-windows.zip
+
       - name: Upload Mac release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: drive-analyzer-v1-3-mac
-          path: mac_release/
+          path: drive-analyzer-v1-3-mac.zip
 
       - name: Upload Windows release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: drive-analyzer-v1-3
-          path: windows_release/
+          path: drive-analyzer-v1-3-windows.zip
