@@ -8,6 +8,7 @@ For info: see Desire in Chromatic Harmony by Kenneth Smith (Oxford, 2020).
 """
 
 import os
+import math
 import platform
 import sys
 import threading
@@ -16,8 +17,11 @@ from typing import Callable, Dict, List, Optional, Tuple, Any, Set
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, Text, BooleanVar, Frame, Label
 import tkinter.font as tkfont
+import matplotlib
+import matplotlib.colors as plocolours
 
 from PIL import Image, ImageDraw, ImageTk
+import numpy as np
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.lib.colors import black, HexColor
@@ -78,7 +82,8 @@ CHORDS = {
     "Cm7": [0, 3, 7, 10], "Cø7": [0, 3, 6, 10], "C7m9noroot": [1, 4, 7, 10],
     "C7no3": [0, 7, 10], "C7no5": [0, 4, 10], "C7noroot": [4, 7, 10],
     "Caug": [0, 4, 8], "C": [0, 4, 7], "Cm": [0, 3, 7],
-    "Cmaj7": [0, 4, 7, 11], "CmMaj7": [0, 3, 7, 11]
+    "Cmaj7": [0, 4, 7, 11], "CmMaj7": [0, 3, 7, 11],
+    "C5": [0, 7]  # Open fifth (power chord): root + fifth, no third.
 }
 
 TRIADS = {"C", "Cm", "Caug"}  # Basic three-note chords
@@ -115,6 +120,7 @@ class LoadOptionsDialog(tk.Toplevel):
         super().__init__(parent)
         self.result = None
         self.include_triads_var = BooleanVar(value=True)
+        self.include_dyads_var = BooleanVar(value=False)
         self.sensitivity_var = tk.StringVar(value="Medium")
         self.selected_file = None
         self.build_ui()
@@ -124,6 +130,11 @@ class LoadOptionsDialog(tk.Toplevel):
 
         ttk.Checkbutton(
             frame, text="Include triads", variable=self.include_triads_var,
+            style="White.TCheckbutton"
+        ).pack(anchor="w", pady=5)
+
+        ttk.Checkbutton(
+            frame, text="Include open fifth dyads", variable=self.include_dyads_var,
             style="White.TCheckbutton"
         ).pack(anchor="w", pady=5)
 
@@ -150,6 +161,7 @@ class LoadOptionsDialog(tk.Toplevel):
             self.result = {
                 "file": path,
                 "include_triads": self.include_triads_var.get(),
+                "include_dyads": self.include_dyads_var.get(),
                 "sensitivity": self.sensitivity_var.get()
             }
             self.destroy()
@@ -205,6 +217,7 @@ class MidiChordAnalyzer(tk.Tk):
 
         # Analysis algorithm settings
         self.include_triads = True
+        self.include_dyads = False
         self.sensitivity = "Low"
         self.min_duration = 0.0
         self.remove_repeats = True
@@ -252,11 +265,13 @@ class MidiChordAnalyzer(tk.Tk):
         default_strengths = {
             "7": 100, "7b5": 90, "7#5": 80, "m7": 70, "ø7": 65,
             "7m9noroot": 65, "7no3": 55, "7no5": 55, "7noroot": 50,
-            "aug": 40, "": 42, "m": 35, "maj7": 30, "mMaj7": 25
+            "aug": 40, "": 42, "m": 35, "maj7": 30, "mMaj7": 25, "5": 20
         }
         
         # Use custom settings if available, otherwise use defaults
-        strength_map = self.custom_strength_map or default_strengths
+        strength_map = default_strengths.copy()
+        if self.custom_strength_map is not None:
+            strength_map.update(self.custom_strength_map)
         
         # Filter out chord types with strength 0 (completely exclude from analysis)
         filtered_strengths = {chord_type: strength for chord_type, strength in strength_map.items() if strength > 0}
@@ -717,6 +732,7 @@ class MidiChordAnalyzer(tk.Tk):
         
         # Analysis algorithm toggles - define these early so they can be referenced
         include_triads_var = tk.BooleanVar(value=self.include_triads)
+        include_dyads_var = tk.BooleanVar(value=self.include_dyads)
         remove_repeats_var = tk.BooleanVar(value=self.remove_repeats)
         include_anacrusis_var = tk.BooleanVar(value=self.include_anacrusis)
         current_arpeggio_mode = getattr(self, 'arpeggio_mode', None)
@@ -786,6 +802,11 @@ class MidiChordAnalyzer(tk.Tk):
         triads_frame = create_setting_section(scrollable_frame, "Include Triads", 
             "Detect and analyze three-note chords (triads) in addition to seventh chords", None)
         ttk.Checkbutton(triads_frame, text="Enabled", variable=include_triads_var, style="Settings.TCheckbutton").pack(anchor="w")
+
+        # Include Dyads (open fifths)
+        dyads_frame = create_setting_section(scrollable_frame, "Include Dyads", 
+            "Detect and analyze open fifth dyads (root + fifth only) as valid harmonic events", None)
+        ttk.Checkbutton(dyads_frame, text="Enabled", variable=include_dyads_var, style="Settings.TCheckbutton").pack(anchor="w")
         
         # Include Anacrusis
         anacrusis_frame = create_setting_section(scrollable_frame, "Include Anacrusis", 
@@ -926,6 +947,7 @@ class MidiChordAnalyzer(tk.Tk):
             
             # Apply basic boolean/text settings
             self.include_triads = include_triads_var.get()
+            self.include_dyads = include_dyads_var.get()
             self.remove_repeats = remove_repeats_var.get()
             
             # For time-segment mode, force certain settings to False
@@ -1048,6 +1070,7 @@ class MidiChordAnalyzer(tk.Tk):
             analysis_mode_var.set("event")
             segment_size_var.set("beats")
             include_triads_var.set(True)
+            include_dyads_var.set(False)
             remove_repeats_var.set(True)
             include_anacrusis_var.set(True)
             arpeggio_mode_var.set("Relaxed")
@@ -1506,7 +1529,7 @@ class MidiChordAnalyzer(tk.Tk):
 
                         anacrusis_candidates_at_time.append((s_start, s_end, s_pitch))
 
-            if len(test_notes) >= 3:
+            if len(test_notes) >= 3 or (self.include_dyads and len(test_notes) >= 2):
                 # Check for chord formation with sufficient note count
                 bar, beat, ts = offset_to_bar_beat(time)
                 
@@ -2881,6 +2904,8 @@ class MidiChordAnalyzer(tk.Tk):
             # Augmented
             'aug': [0, 4, 8],
             '+': [0, 4, 8],
+            # Open fifth (power chord, no third)
+            '5': [0, 7],
         }
         
         # Get chord type from chord name (everything after root)
@@ -2940,7 +2965,7 @@ class MidiChordAnalyzer(tk.Tk):
         Tests all possible roots and matches against known chord patterns.
         Includes special handling for "no3" chords to verify third presence.
         """
-        if len(semitones) < 3:
+        if len(semitones) < 2:
             return []
 
         chords_found = []
@@ -2970,6 +2995,8 @@ class MidiChordAnalyzer(tk.Tk):
                 # Convert chord quality back to full chord name for CHORDS lookup
                 full_name = 'C' + name
                 if full_name in TRIADS and not self.include_triads:
+                    continue
+                if full_name == 'C5' and not self.include_dyads:
                     continue
                 if full_name not in CHORDS:
                     continue
@@ -3010,6 +3037,8 @@ class MidiChordAnalyzer(tk.Tk):
                 # Convert chord quality back to full chord name for CHORDS lookup
                 full_name = 'C' + name
                 if full_name in TRIADS and not self.include_triads:
+                    continue
+                if full_name == 'C5' and not self.include_dyads:
                     continue
                 if full_name not in CHORDS:
                     continue
@@ -3328,6 +3357,7 @@ class EmbeddedMidiKeyboard:
 
         self.selected_notes = set()
         self.include_triads_var = tk.BooleanVar(value=True)
+        self.include_dyads_var = tk.BooleanVar(value=False)
 
         # Build a simple layout on the parent (dark background)
         self.canvas = tk.Canvas(self.parent, width=700, height=200, bg="black", highlightthickness=0)
@@ -3380,6 +3410,12 @@ class EmbeddedMidiKeyboard:
             new_text = "Include triads: ON" if self.include_triads_var.get() else "Include triads: OFF"
             self.triads_btn.config(text=new_text)
             self.analyze_chord()  # refresh analysis when toggled
+
+        def toggle_dyads():
+            self.include_dyads_var.set(not self.include_dyads_var.get())
+            new_text = "Include dyads: ON" if self.include_dyads_var.get() else "Include dyads: OFF"
+            self.dyads_btn.config(text=new_text)
+            self.analyze_chord()
         
         # Platform-friendly triads button - same approach as Clear button
         import platform
@@ -3395,6 +3431,14 @@ class EmbeddedMidiKeyboard:
             command=toggle_triads, **triads_btn_kwargs
         )
         self.triads_btn.pack(side="left", padx=10, pady=2)
+
+        self.dyads_btn = tk.Button(
+            controls_frame,
+            text="Include dyads: ON" if self.include_dyads_var.get() else "Include dyads: OFF",
+            command=toggle_dyads,
+            **triads_btn_kwargs
+        )
+        self.dyads_btn.pack(side="left", padx=10, pady=2)
 
         # Platform-friendly clear button
         if platform.system() == "Darwin":  # Mac
@@ -3699,7 +3743,12 @@ class EmbeddedMidiKeyboard:
                 return
 
             # Use the main app's detect_chords method for full drive analysis
-            detected_chords = self.main_app.detect_chords(self.selected_notes)
+            previous_dyad_setting = self.main_app.include_dyads
+            self.main_app.include_dyads = self.include_dyads_var.get()
+            try:
+                detected_chords = self.main_app.detect_chords(self.selected_notes)
+            finally:
+                self.main_app.include_dyads = previous_dyad_setting
             
             if detected_chords:
                 lines = []
@@ -3944,6 +3993,25 @@ class GridWindow(tk.Toplevel):
         self.left_canvas = tk.Canvas(container, width=left_col_width, height=canvas_height, bg="white", highlightthickness=0)
         self.left_canvas.pack(side="left", fill="y")
 
+        # Minimum entropic weight required for a drive to be drawn in the Tk grid.
+        slider_frame = tk.Frame(container, bg="white")
+        slider_frame.pack(side="right", fill="y", padx=(4, 8))
+        tk.Label(slider_frame, text="Min\nweight", bg="white", justify="center").pack(side="top", pady=(4, 4))
+        tk.Label(slider_frame, text="MAX", bg="white").pack(side="top")
+        self.min_probability_var = tk.DoubleVar(value=0.0)
+        self.probability_slider = tk.Scale(
+            slider_frame,
+            from_=1.0,
+            to=0.0,
+            resolution=0.01,
+            orient="vertical",
+            length=max(150, canvas_height - 40),
+            variable=self.min_probability_var,
+            command=lambda _value: self.redraw(),
+        )
+        self.probability_slider.pack(side="top", fill="y", expand=True)
+        tk.Label(slider_frame, text="MIN", bg="white").pack(side="bottom")
+
         # Right scrollable area for the grid
         right_frame = ttk.Frame(container, style="GridWindow.TFrame")
         right_frame.pack(side="left", fill="both", expand=True)
@@ -4099,7 +4167,8 @@ class GridWindow(tk.Toplevel):
         payload = self.events.get(event_key, {})
         chords = payload.get("chords", [])
 
-        if not chords:
+        modified_scores = payload.get("modified_scores")
+        if not chords or not modified_scores:
             return 0.0
 
         analyzer = EntropyAnalyzer(
@@ -4108,22 +4177,13 @@ class GridWindow(tk.Toplevel):
             logger=lambda x: None,
             strength_map=self.custom_strength_map,
             rule_params=self.custom_rule_params
-        )    
-        scores = []
-        for chord in chords:
-            score = analyzer._compute_score(chord)
-            if isinstance(score, tuple):
-                for x in score:
-                    if isinstance(x, (int, float)):
-                        score = x
-                        break
-            scores.append(score)
-        H = analyzer._weighted_entropy(scores, base=2)
+        )
+        H = analyzer._weighted_entropy(list(modified_scores.values()), base=2)
         return H
 
-    def redraw_entropy(self):
+    def redraw_entropy(self, show_info=True):
         # --- Entropy review info window logic ---
-        if self.show_entropy_var.get():
+        if self.show_entropy_var.get() and show_info:
             # Compose entropy review text (replace with your actual entropy review logic)
             entropy_review = self.main_app.entropy_review_text if (self.main_app and hasattr(self.main_app, 'entropy_review_text')) else "Entropy review information not available."
             self.show_entropy_info_window(entropy_review)
@@ -4224,6 +4284,8 @@ class GridWindow(tk.Toplevel):
             return "maj"  # C, D, E, F, G = major triad
         elif suffix == "m":
             return "min"  # Cm, Dm, etc.
+        elif suffix == "5":
+            return "open5"  # Open fifth (power chord), e.g. C5, F#5
 
         # Add more specific checks for known types
         elif "maj7" in suffix or "mMaj7" in suffix:
@@ -4240,6 +4302,74 @@ class GridWindow(tk.Toplevel):
             return "aug"
         else:
             return "other"
+
+    def _open_fifth_shape_points(self, cx, cy, radius):
+        """Return Douggie's concave-sided open-fifth/hourglass outline."""
+        half_w = radius * 0.55
+        half_h = radius * 1.05
+        depth = half_w * 0.85
+        steps = tuple(np.linspace(0, 1, 100, endpoint=False))
+
+        points = [
+            (cx - half_w, cy - half_h),
+            (cx + half_w, cy - half_h),
+        ]
+        for position in steps:
+            y = (cy - half_h) + position * (2 * half_h)
+            bulge = depth * math.sin(math.pi * position) ** 0.5
+            points.append((cx + half_w - bulge, y))
+        points.append((cx + half_w, cy + half_h))
+        points.append((cx - half_w, cy + half_h))
+        for position in reversed(steps):
+            y = (cy - half_h) + position * (2 * half_h)
+            bulge = depth * math.sin(math.pi * position) ** 0.5
+            points.append((cx - half_w + bulge, y))
+        return points
+
+    def get_chord_probability(self, chord, event_key):
+        """Return this chord's share of the event's calculated score."""
+        event_data = self.events.get(event_key, {})
+        chords = event_data.get("chords", [])
+        basses = event_data.get("basses", [])
+        if not chords:
+            return None
+
+        analyzer = EntropyAnalyzer(
+            {event_key: event_data},
+            base=2,
+            logger=lambda x: None,
+            strength_map=self.custom_strength_map,
+            rule_params=self.custom_rule_params
+        )
+        chord_scores = [
+            (candidate, analyzer._compute_score(candidate, basses, event_data)[0])
+            for candidate in chords
+        ]
+        target_score = next((score for candidate, score in chord_scores if candidate == chord), None)
+        total_score = sum(score for _, score in chord_scores)
+        if target_score is None or total_score == 0:
+            return None
+        return target_score / total_score
+
+    def get_chord_entropic_weight(self, chord, event_key):
+        """Return the chord's share of the stored, context-adjusted score."""
+        event_data = self.events.get(event_key, {})
+        modified_scores = event_data.get("modified_scores")
+        if not modified_scores:
+            return None
+        total_score = sum(modified_scores.values())
+        target_score = modified_scores.get(chord)
+        if target_score is None or total_score == 0:
+            return None
+        return target_score / total_score
+
+    def get_colour(self, chord, event_key):
+        """Return Douggie's continuous bone-scale colour for a chord."""
+        probability = self.get_chord_entropic_weight(chord, event_key)
+        if probability is None:
+            return "#ffffff"
+        colour_map = matplotlib.colormaps["bone"]
+        return plocolours.to_hex(colour_map(1 - probability))
 
     def get_chord_strength_category(self, chord, event_key):
         """Calculate chord strength percentage and return color category."""
@@ -4498,7 +4628,7 @@ class GridWindow(tk.Toplevel):
 
                         chord_type = self.classify_chord_type(chord)
                         strength_category = self.get_chord_strength_category(chord, event_key)
-                        fill_color = self.STRENGTH_COLORS_PDF.get(strength_category, HexColor("#CCCCCC")) if use_color else HexColor("#FFFFFF")
+                        fill_color = HexColor(self.get_colour(chord, event_key)) if use_color else HexColor("#FFFFFF")
                         c.setFillColor(fill_color)
                         c.setStrokeColor(black)
 
@@ -4516,10 +4646,18 @@ class GridWindow(tk.Toplevel):
                             path.lineTo(x + radius, y + radius)
                             path.close()
                             c.drawPath(path, stroke=1, fill=1 if use_color else 0)
+                        elif chord_type == "open5":
+                            shape_points = self._open_fifth_shape_points(x, y, radius)
+                            path = c.beginPath()
+                            path.moveTo(shape_points[0][0], shape_points[0][1])
+                            for point_x, point_y in shape_points[1:]:
+                                path.lineTo(point_x, point_y)
+                            path.close()
+                            c.drawPath(path, stroke=1, fill=1 if use_color else 0)
                         else:
                             c.circle(x, y, circle_radius, stroke=1, fill=1 if use_color else 0)
 
-                        if chord_type not in ("maj", "min"):
+                        if chord_type not in ("maj", "min", "open5"):
                             function_label = chord[len(root):] or "–"
                             function_label_lower = function_label.lower()
                             replaced = False
@@ -4645,6 +4783,8 @@ class GridWindow(tk.Toplevel):
         self.draw_grid()
         self.canvas.update_idletasks()
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
+        if self.show_entropy_var.get():
+            self.redraw_entropy(show_info=False)
 
     def draw_grid(self):
         radius = int(self.CELL_SIZE * 0.65 / 2)  # Reduced from 0.85 to make triangles smaller
@@ -4680,6 +4820,9 @@ class GridWindow(tk.Toplevel):
                 
                 for root, chord in chords_by_root.items():
                     if root not in self.root_to_row:
+                        continue
+                    probability = self.get_chord_entropic_weight(chord, event_key)
+                    if probability is not None and probability < self.min_probability_var.get():
                         continue
                     row = self.root_to_row[root]
                     x = self.PADDING + col * self.CELL_SIZE + self.CELL_SIZE // 2
@@ -4725,6 +4868,9 @@ class GridWindow(tk.Toplevel):
                 for root, chord in chords_by_root.items():
                     if root not in self.root_to_row:
                         continue
+                    probability = self.get_chord_entropic_weight(chord, event_key)
+                    if probability is not None and probability < self.min_probability_var.get():
+                        continue
                     row = self.root_to_row[root]
                     x = self.PADDING + col * self.CELL_SIZE + self.CELL_SIZE // 2
                     y = self.PADDING + row * self.CELL_SIZE + self.CELL_SIZE // 2
@@ -4733,7 +4879,7 @@ class GridWindow(tk.Toplevel):
                     chord_type = self.classify_chord_type(chord)
                     # Get strength category for color determination  
                     strength_category = self.get_chord_strength_category(chord, event_key)
-                    fill_color = self.STRENGTH_COLORS_TK.get(strength_category, "#CCCCCC") if self.color_pdf_var.get() else "white"
+                    fill_color = self.get_colour(chord, event_key) if self.color_pdf_var.get() else "white"
 
                     if chord_type == "maj":
                         # Upward pointing triangle
@@ -4751,6 +4897,10 @@ class GridWindow(tk.Toplevel):
                             x + radius, y - radius,  # top-right vertex
                         ]
                         self.canvas.create_polygon(points, fill=fill_color, outline="black")
+                    elif chord_type == "open5":
+                        shape_points = self._open_fifth_shape_points(x, y, radius)
+                        flat_points = [coordinate for point in shape_points for coordinate in point]
+                        self.canvas.create_polygon(flat_points, fill=fill_color, outline="black", smooth=True)
                     else:
                         self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=fill_color, outline="black")
 
@@ -4854,7 +5004,7 @@ class DriveStrengthParametersDialog:
     DEFAULT_STRENGTH_MAP = {
         "7": 100, "7b5": 90, "7#5": 80, "m7": 70, "ø7": 65,
         "7m9noroot": 65, "7no3": 55, "7no5": 55, "7noroot": 50,
-        "aug": 40, "": 42, "m": 35, "maj7": 30, "mMaj7": 25
+        "aug": 40, "": 42, "m": 35, "maj7": 30, "mMaj7": 25, "5": 10
     }
     
     DEFAULT_RULE_PARAMS = {
@@ -5061,7 +5211,8 @@ class DriveStrengthParametersDialog:
             "": "Major triad",
             "m": "Minor triad",
             "maj7": "Major 7th",
-            "mMaj7": "Minor-major 7th"
+            "mMaj7": "Minor-major 7th",
+            "5": "Open fifth (no 3rd)"
         }
         
         row = 0
@@ -5497,6 +5648,7 @@ class EntropyAnalyzer:
         "m": 35,
         "maj7": 30,
         "mMaj7": 25,
+        "5": 10,
     }
 
     def __init__(
@@ -5515,20 +5667,22 @@ class EntropyAnalyzer:
         self.custom_steps: List[Tuple[str, Callable[["EntropyAnalyzer"], None]]] = []
         
         # Use provided parameters or defaults
-        self.strength_map = strength_map if strength_map is not None else self._STRENGTH_MAP.copy()
+        self.strength_map = self._STRENGTH_MAP.copy()
+        if strength_map is not None:
+            self.strength_map.update(strength_map)
         
         # Default rule parameters (synchronized with dialog defaults)
         default_rule_params = {
             "rule1_bass_support": 20,
             "rule2_tonic_dominant": 50,
             "rule2_selected_tonic": "No Tonic",  # Default: disabled
-            "rule3_root_repetition": 20,
-            "rule4_resolution_max": 50,
-            "rule5_clean_voicing": 50,
-            "rule6_same_chord": 33,
-            "rule6_dominant_prep": 50,
-            "rule7_root_doubled": 33,
-            "rule7_root_tripled": 50
+            "rule3_root_repetition": 2,
+            "rule4_resolution_max": 10,
+            "rule5_clean_voicing": 10,
+            "rule6_same_chord": 5,
+            "rule6_dominant_prep": 10,
+            "rule7_root_doubled": 5,
+            "rule7_root_tripled": 10
         }
         self.rule_params = rule_params if rule_params is not None else default_rule_params
 
@@ -5658,6 +5812,11 @@ class EntropyAnalyzer:
                 prev_count = root_counter.get(root, 0)
                 root_counter[root] = prev_count + 1
 
+            if chord_scores:
+                payload["modified_scores"] = {
+                    chord: score for chord, score, _ in chord_scores
+                }
+
             # Update Rule4 counters
             for prev_root in pending_roots:
                 for cur_root in current_event_roots:
@@ -5712,22 +5871,10 @@ class EntropyAnalyzer:
         # --- Compute and print average and maximum entropy ---
         entropy_values = []
         for payload in self.events.values():
-            chords = payload.get("chords", [])
-            if not chords:
+            modified_scores = payload.get("modified_scores")
+            if not modified_scores:
                 continue
-            # For each event, compute entropy of the chord strengths (base + bonuses)
-            event_scores = []
-            for chord in chords:
-                score, _ = self._compute_score(chord, payload.get("basses", []), payload)
-                event_scores.append(score)
-            if event_scores:
-                # Use Shannon entropy of the event's chord scores
-                from math import log2
-                from collections import Counter
-                counts = Counter(event_scores)
-                total = sum(counts.values())
-                entropy = -sum((count/total) * log2(count/total) for count in counts.values()) if total > 0 else 0.0
-                entropy_values.append(entropy)
+            entropy_values.append(self._weighted_entropy(list(modified_scores.values()), base=2))
         if entropy_values:
             avg_entropy = sum(entropy_values) / len(entropy_values)
             max_entropy = max(entropy_values)
