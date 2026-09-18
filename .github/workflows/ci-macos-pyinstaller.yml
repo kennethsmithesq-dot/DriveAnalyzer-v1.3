@@ -290,8 +290,9 @@ jobs:
           mv DriveAnalyzer.app ../../mac_release/DriveAnalyzer_arm64.app
           cd ../..
           
-          # Copy sample XML files and manual
-          cp -r assets/sample_xml mac_release/
+          # Copy sample MusicXML files and manual
+          mkdir -p "mac_release/Sample MusicXML Files"
+          find assets -maxdepth 1 -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp {} "mac_release/Sample MusicXML Files/" \;
           cp assets/manual.pdf mac_release/
 
           # List contents for verification
@@ -304,8 +305,9 @@ jobs:
           # Copy the exe directly
           cp artifacts/driveanalyzer-windows-exe/DriveAnalyzer.exe windows_release/drive_analyzer.exe
           
-          # Copy sample XML files and manual
-          cp -r assets/sample_xml windows_release/
+          # Copy sample MusicXML files and manual
+          mkdir -p "windows_release/Sample MusicXML Files"
+          find assets -maxdepth 1 -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp {} "windows_release/Sample MusicXML Files/" \;
           cp assets/manual.pdf windows_release/
 
           # List contents for verification
