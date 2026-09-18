@@ -3357,7 +3357,6 @@ class EmbeddedMidiKeyboard:
 
         self.selected_notes = set()
         self.include_triads_var = tk.BooleanVar(value=True)
-        self.include_dyads_var = tk.BooleanVar(value=False)
 
         # Build a simple layout on the parent (dark background)
         self.canvas = tk.Canvas(self.parent, width=700, height=200, bg="black", highlightthickness=0)
@@ -3411,12 +3410,6 @@ class EmbeddedMidiKeyboard:
             self.triads_btn.config(text=new_text)
             self.analyze_chord()  # refresh analysis when toggled
 
-        def toggle_dyads():
-            self.include_dyads_var.set(not self.include_dyads_var.get())
-            new_text = "Include dyads: ON" if self.include_dyads_var.get() else "Include dyads: OFF"
-            self.dyads_btn.config(text=new_text)
-            self.analyze_chord()
-        
         # Platform-friendly triads button - same approach as Clear button
         import platform
         if platform.system() == "Darwin":  # Mac
@@ -3431,14 +3424,6 @@ class EmbeddedMidiKeyboard:
             command=toggle_triads, **triads_btn_kwargs
         )
         self.triads_btn.pack(side="left", padx=10, pady=2)
-
-        self.dyads_btn = tk.Button(
-            controls_frame,
-            text="Include dyads: ON" if self.include_dyads_var.get() else "Include dyads: OFF",
-            command=toggle_dyads,
-            **triads_btn_kwargs
-        )
-        self.dyads_btn.pack(side="left", padx=10, pady=2)
 
         # Platform-friendly clear button
         if platform.system() == "Darwin":  # Mac
@@ -3743,11 +3728,14 @@ class EmbeddedMidiKeyboard:
                 return
 
             # Use the main app's detect_chords method for full drive analysis
+            previous_triads_setting = self.main_app.include_triads
             previous_dyad_setting = self.main_app.include_dyads
-            self.main_app.include_dyads = self.include_dyads_var.get()
+            self.main_app.include_triads = self.include_triads_var.get()
+            self.main_app.include_dyads = False
             try:
                 detected_chords = self.main_app.detect_chords(self.selected_notes)
             finally:
+                self.main_app.include_triads = previous_triads_setting
                 self.main_app.include_dyads = previous_dyad_setting
             
             if detected_chords:
