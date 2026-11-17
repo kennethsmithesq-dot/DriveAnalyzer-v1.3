@@ -73,8 +73,9 @@ jobs:
           if [ -d dist/DriveAnalyzer.app ]; then
             # Create a clean zip of just the .app bundle (no parent directories)
             cd dist
-            zip -r ../driveanalyzer-x86_64-clean.zip DriveAnalyzer.app
+            zip -yr ../driveanalyzer-x86_64-clean.zip DriveAnalyzer.app
             cd ..
+            unzip -tq driveanalyzer-x86_64-clean.zip
             ls -la driveanalyzer-x86_64-clean.zip
           else
             echo "Warning: .app bundle not found"
@@ -173,8 +174,9 @@ jobs:
           if [ -d dist/DriveAnalyzer.app ]; then
             # Create a clean zip of just the .app bundle (no parent directories)
             cd dist
-            zip -r ../driveanalyzer-arm64-clean.zip DriveAnalyzer.app
+            zip -yr ../driveanalyzer-arm64-clean.zip DriveAnalyzer.app
             cd ..
+            unzip -tq driveanalyzer-arm64-clean.zip
             ls -la driveanalyzer-arm64-clean.zip
           else
             echo "Warning: .app bundle not found"
@@ -291,11 +293,11 @@ jobs:
           cd ../..
           
           # Copy sample MusicXML files and manual
-          mkdir -p "mac_release/Sample MusicXML Files"
+          mkdir -p mac_release/sample_xml
           test -d assets/sample_xml
-          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} "mac_release/Sample MusicXML Files/" \;
-          test -n "$(find "mac_release/Sample MusicXML Files" -type f -print -quit)"
-          find "mac_release/Sample MusicXML Files" -type f -maxdepth 1 -print
+          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} mac_release/sample_xml/ \;
+          test -n "$(find mac_release/sample_xml -type f -print -quit)"
+          find mac_release/sample_xml -type f -maxdepth 1 -print
           cp assets/manual.pdf mac_release/
 
           # List contents for verification
@@ -309,11 +311,11 @@ jobs:
           cp artifacts/driveanalyzer-windows-exe/DriveAnalyzer.exe windows_release/drive_analyzer.exe
           
           # Copy sample MusicXML files and manual
-          mkdir -p "windows_release/Sample MusicXML Files"
+          mkdir -p windows_release/sample_xml
           test -d assets/sample_xml
-          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} "windows_release/Sample MusicXML Files/" \;
-          test -n "$(find "windows_release/Sample MusicXML Files" -type f -print -quit)"
-          find "windows_release/Sample MusicXML Files" -type f -maxdepth 1 -print
+          find assets/sample_xml -type f \( -iname '*.xml' -o -iname '*.musicxml' -o -iname '*.mxl' \) -exec cp -v {} windows_release/sample_xml/ \;
+          test -n "$(find windows_release/sample_xml -type f -print -quit)"
+          find windows_release/sample_xml -type f -maxdepth 1 -print
           cp assets/manual.pdf windows_release/
 
           # List contents for verification
@@ -321,15 +323,17 @@ jobs:
 
       - name: Create release zip files
         run: |
-          zip -r -q drive-analyzer-v1-3-mac.zip mac_release
+          zip -yr -q drive-analyzer-v1-3-mac.zip mac_release
+          unzip -tq drive-analyzer-v1-3-mac.zip
           zip -r -q drive-analyzer-v1-3-windows.zip windows_release
           ls -lh drive-analyzer-v1-3-mac.zip drive-analyzer-v1-3-windows.zip
 
       - name: Upload Mac release package
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
-          name: drive-analyzer-v1-3-mac
           path: drive-analyzer-v1-3-mac.zip
+          archive: false
+          if-no-files-found: error
 
       - name: Upload Windows release package
         uses: actions/upload-artifact@v5
