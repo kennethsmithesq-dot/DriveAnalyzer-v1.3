@@ -83,13 +83,13 @@ jobs:
           fi
 
       - name: Upload artifact (.app bundle zip)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-x86_64-app
           path: driveanalyzer-x86_64-clean.zip
 
       - name: Upload build logs and diagnostics
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-x86_64-logs
           path: |
@@ -184,13 +184,13 @@ jobs:
           fi
 
       - name: Upload artifact (.app bundle zip)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-arm64-app
           path: driveanalyzer-arm64-clean.zip
 
       - name: Upload build logs and diagnostics (arm64)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-arm64-logs
           path: |
@@ -252,13 +252,13 @@ jobs:
           }
 
       - name: Upload artifact (exe)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-windows-exe
           path: dist/DriveAnalyzer.exe
 
       - name: Upload build logs and diagnostics (Windows)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: driveanalyzer-windows-logs
           path: |
@@ -275,7 +275,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -336,7 +336,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload Windows release package
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: drive-analyzer-v1-3
           path: drive-analyzer-v1-3-windows.zip
